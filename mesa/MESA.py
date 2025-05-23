@@ -2,7 +2,7 @@
  # @ Author: Chaorong Chen
  # @ Create Time: 2022-06-14 17:00:56
  # @ Modified by: Chaorong Chen
- # @ Modified time: 2024-12-19 16:26:11
+ # @ Modified time: 2025-05-22 19:41:32
  # @ Description: MESA
  """
 
@@ -14,7 +14,7 @@ from joblib import Parallel, delayed
 import numpy as np
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import roc_auc_score
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, RepeatedStratifiedKFold
 from boruta import BorutaPy
 from scipy.stats import mannwhitneyu
 from sklearn.ensemble import RandomForestClassifier
@@ -22,9 +22,17 @@ from sklearn.feature_selection import GenericUnivariateSelect, VarianceThreshold
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import Normalizer, StandardScaler
 from collections.abc import Sequence
-
+from sklearn.linear_model import LogisticRegression
 
 def disp_mesa(txt):
+    """
+    Display a timestamped message to stderr for MESA logging.
+    
+    Parameters
+    ----------
+    txt : str
+        The message text to display.
+    """
     print("@%s \t%s" % (time.asctime(), txt), file=sys.stderr)
 
 
@@ -32,33 +40,58 @@ def wilcoxon(X, y):
     """
     Score function for feature selection using Wilcoxon rank-sum test.
 
-    Args:
-        X: dataframe or array of shape (n_features, n_samples)
-        y: array-like of shape (n_samples,)
+    Parameters
+    ----------
+    X : array-like of shape (n_samples, n_features)
+        Feature matrix where each row is a sample and each column is a feature.
+    y : array-like of shape (n_samples,)
+        Binary target labels (0 or 1).
 
-    Returns:
-        p-values of Wilcoxon rank-sum test for each feature
+    Returns
+    -------
+    ndarray of shape (n_features,)
+        Negative p-values from Wilcoxon rank-sum test for each feature.
+        Lower values indicate more significant differences between classes.
     """
     return -mannwhitneyu(X[y == 0], X[y == 1])[1]
 
 
 class BorutaSelector(BorutaPy):
     """
-    BorutaSelector is a feature selection class that extends BorutaPy to select the top n features based on their ranking.
+    Feature selector that extends BorutaPy to select the top n features based on ranking.
+    
+    This class wraps the Boruta feature selection algorithm and provides functionality
+    to select a specific number of top-ranked features rather than all confirmed features.
+    
     Parameters
     ----------
-    n : int, optional (default=10)
-        The number of top features to select.
-    **kwargs :
-        Additional keyword arguments to pass to the BorutaPy constructor.
+    n : int, default=10
+        The number of top features to select based on Boruta ranking.
+    **kwargs : dict
+        Additional keyword arguments passed to the BorutaPy constructor.
+        
+    Attributes
+    ----------
+    n : int
+        Number of features to select.
+    indices : ndarray
+        Indices of the selected features after fitting.
+        
     Methods
     -------
     fit(X, y)
-        Fits the Boruta feature selection algorithm on the provided data.
+        Fit the Boruta algorithm and identify top n features.
     transform(X)
-        Transforms the data to contain only the selected top n features.
+        Transform data to contain only the selected features.
     get_support()
-        Returns the indices of the selected top n features.
+        Get indices of selected features.
+        
+    Examples
+    --------
+    >>> from sklearn.ensemble import RandomForestClassifier
+    >>> selector = BorutaSelector(n=5, estimator=RandomForestClassifier())
+    >>> selector.fit(X_train, y_train)
+    >>> X_selected = selector.transform(X_test)
     """
 
     def __init__(self, n=10, **kwargs):
@@ -66,11 +99,44 @@ class BorutaSelector(BorutaPy):
         self.n = n
 
     def fit(self, X, y):
+        """
+        Fit the Boruta feature selection algorithm and select top n features.
+        
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data.
+        y : array-like of shape (n_samples,)
+            Target values.
+            
+        Returns
+        -------
+        self : object
+            Returns the instance itself.
+        """
         super().fit(X, y)
         self.indices = np.argsort(self.ranking_)[: self.n]
         return self
 
     def transform(self, X):
+        """
+        Transform data to contain only the selected top n features.
+        
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Data to transform.
+            
+        Returns
+        -------
+        X_transformed : array-like of shape (n_samples, n)
+            Transformed data with only selected features.
+            
+        Raises
+        ------
+        ValueError
+            If fit has not been called yet.
+        """
         try:
             self.ranking_
         except AttributeError:
@@ -81,15 +147,76 @@ class BorutaSelector(BorutaPy):
             return X[:, self.indices]
 
     def get_support(self):
+        """
+        Get indices of the selected features.
+        
+        Returns
+        -------
+        indices : ndarray
+            Indices of the selected top n features.
+        """
         return self.indices
 
 
 class missing_value_processing:
+    """
+    Preprocessing class for handling missing values with ratio-based filtering.
+    
+    This class filters out features with too many missing values and imputes
+    the remaining missing values using a specified imputation strategy.
+    
+    Parameters
+    ----------
+    ratio : float, default=0.9
+        Minimum ratio of non-missing values required to keep a feature.
+        Features with less than this ratio of valid values are removed.
+    imputer : sklearn imputer, default=SimpleImputer(strategy="mean")
+        Imputation strategy for remaining missing values.
+        
+    Attributes
+    ----------
+    ratio : float
+        The minimum valid value ratio threshold.
+    imputer : sklearn imputer
+        The fitted imputer for missing value replacement.
+    indices : ndarray
+        Indices of features that pass the missing value threshold.
+        
+    Methods
+    -------
+    fit(X, y=None)
+        Identify features meeting the valid ratio threshold and fit imputer.
+    transform(X)
+        Transform data by removing high-missing features and imputing values.
+    get_support()
+        Get indices of features that passed the missing value filter.
+    """
+
     def __init__(self, ratio=0.9, imputer=SimpleImputer(strategy="mean")):
         self.ratio = ratio
         self.imputer = imputer
 
     def fit(self, X, y=None):
+        """
+        Fit the missing value processor by identifying valid features and fitting imputer.
+        
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data.
+        y : array-like of shape (n_samples,), optional
+            Target values (ignored, present for API consistency).
+            
+        Returns
+        -------
+        self : object
+            Returns the instance itself.
+            
+        Raises
+        ------
+        ValueError
+            If ratio is not greater than 0.
+        """
         if self.ratio > 0:
             self.indices = np.where(
                 pd.DataFrame(X).count(axis="rows") >= X.shape[0] * self.ratio
@@ -102,6 +229,24 @@ class missing_value_processing:
             raise ValueError("The ratio of valid values should be greater than 0.")
 
     def transform(self, X):
+        """
+        Transform data by removing high-missing features and imputing remaining values.
+        
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Data to transform.
+            
+        Returns
+        -------
+        X_transformed : pandas.DataFrame
+            Transformed data with missing values handled.
+            
+        Raises
+        ------
+        ValueError
+            If ratio is not greater than 0.
+        """
         if self.ratio > 0:
             return pd.DataFrame(
                 self.imputer.transform(pd.DataFrame(X).iloc[:, self.indices]),
@@ -112,50 +257,79 @@ class missing_value_processing:
             raise ValueError("The ratio of valid values should be greater than 0.")
 
     def get_support(self):
+        """
+        Get indices of features that passed the missing value filter.
+        
+        Returns
+        -------
+        indices : ndarray
+            Indices of features with sufficient non-missing values.
+        """
         return self.indices
 
 
 class MESA_modality:
     """
-    A class used to represent the MESA modality.
+    A comprehensive modality class for feature selection and classification in MESA.
+    
+    This class implements a complete pipeline including missing value handling,
+    variance filtering, univariate feature selection, Boruta feature selection,
+    normalization, and classification.
+
+    Parameters
+    ----------
+    random_state : int, default=0
+        Random seed for reproducibility across all components.
+    boruta_estimator : estimator object, default=RandomForestClassifier(random_state=0, n_jobs=-1)
+        The base estimator used for Boruta feature selection.
+    top_n : int, default=100
+        Number of top features to select using Boruta algorithm.
+    variance_threshold : float, default=0
+        Threshold for variance-based feature filtering. Features with variance
+        below this threshold are removed.
+    normalization : bool, default=False
+        Whether to apply L2 normalization to the data.
+    missing : float, default=0.1
+        Maximum proportion of missing values allowed per feature.
+        Features exceeding this are removed.
+    classifier : estimator object, default=RandomForestClassifier(random_state=0, n_jobs=-1)
+        The final classifier for prediction.
+    selector : int or selector object, default=GenericUnivariateSelect(score_func=wilcoxon, mode="k_best", param=2000)
+        Univariate feature selector. If int, creates GenericUnivariateSelect with that many features.
+    **kwargs : dict
+        Additional parameters to set as attributes.
 
     Attributes
     ----------
-    random_state : int
-        Random seed for reproducibility.
-    boruta_estimator : estimator object
-        The estimator used for the Boruta feature selection.
-    top_n : int
-        Number of top features to select using Boruta.
-    variance_threshold : float
-        Threshold for variance threshold feature selection.
-    normalization : bool
-        Whether to apply normalization to the data.
-    missing : float
-        Threshold for missing values.
+    pipeline : sklearn.pipeline.Pipeline
+        The fitted preprocessing pipeline.
     classifier : estimator object
-        The classifier used for prediction.
-    selector : selector object
-        The selector used for univariate feature selection.
+        The fitted final classifier.
 
     Methods
     -------
     fit(X, y)
-        Fits the pipeline and classifier to the data.
+        Fit the complete pipeline and classifier to training data.
     transform(X)
-        Transforms the data using the fitted pipeline.
+        Apply only the preprocessing pipeline to data.
     predict(X)
-        Predicts the class labels for the input data.
+        Predict class labels for preprocessed data.
     predict_proba(X)
-        Predicts class probabilities for the input data.
+        Predict class probabilities for preprocessed data.
     transform_predict(X)
-        Transforms the data and then predicts the class labels.
+        Apply preprocessing pipeline and predict class labels.
     transform_predict_proba(X)
-        Transforms the data and then predicts class probabilities.
+        Apply preprocessing pipeline and predict class probabilities.
     get_support(step=None)
-        Gets the indices of the selected features.
+        Get indices of features selected by pipeline components.
     get_params(deep=True)
-        Gets the parameters of the MESA_modality instance.
+        Get parameters of the MESA_modality instance.
+        
+    Examples
+    --------
+    >>> modality = MESA_modality(top_n=50, missing=0.2)
+    >>> modality.fit(X_train, y_train)
+    >>> predictions = modality.transform_predict_proba(X_test)
     """
 
     def __init__(
@@ -179,12 +353,31 @@ class MESA_modality:
         self.normalization = normalization
         self.missing = missing
         self.classifier = classifier
-        self.selector = selector
+        if isinstance(selector, int):
+            self.selector = GenericUnivariateSelect(
+                score_func=wilcoxon, mode="k_best", param=selector
+            )
+        else:
+            self.selector = selector
         for key, value in kwargs.items():
             setattr(self, key, value)
-        pass
 
     def fit(self, X, y):
+        """
+        Fit the complete preprocessing pipeline and classifier.
+        
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training feature matrix.
+        y : array-like of shape (n_samples,)
+            Training target values.
+            
+        Returns
+        -------
+        self : object
+            Returns the fitted instance.
+        """
         pipeline_steps = [
             missing_value_processing(ratio=1 - self.missing),
             VarianceThreshold(self.variance_threshold),
@@ -204,21 +397,100 @@ class MESA_modality:
         return self
 
     def transform(self, X):
+        """
+        Apply the preprocessing pipeline to data.
+        
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Data to transform.
+            
+        Returns
+        -------
+        X_transformed : array-like
+            Preprocessed data.
+        """
         return self.pipeline.transform(X)
 
     def predict(self, X):
+        """
+        Predict class labels for preprocessed data.
+        
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Preprocessed feature matrix.
+            
+        Returns
+        -------
+        y_pred : ndarray of shape (n_samples,)
+            Predicted class labels.
+        """
         return self.classifier.predict(X)
 
     def predict_proba(self, X):
+        """
+        Predict class probabilities for preprocessed data.
+        
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Preprocessed feature matrix.
+            
+        Returns
+        -------
+        y_proba : ndarray of shape (n_samples, n_classes)
+            Predicted class probabilities.
+        """
         return self.classifier.predict_proba(X)
 
     def transform_predict(self, X):
+        """
+        Apply preprocessing pipeline and predict class labels.
+        
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Raw feature matrix.
+            
+        Returns
+        -------
+        y_pred : ndarray of shape (n_samples,)
+            Predicted class labels.
+        """
         return self.classifier.predict(self.pipeline.transform(X))
 
     def transform_predict_proba(self, X):
+        """
+        Apply preprocessing pipeline and predict class probabilities.
+        
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Raw feature matrix.
+            
+        Returns
+        -------
+        y_proba : ndarray of shape (n_samples, n_classes)
+            Predicted class probabilities.
+        """
         return self.classifier.predict_proba(self.pipeline.transform(X))
 
     def get_support(self, step=None):
+        """
+        Get indices of features selected by pipeline components.
+        
+        Parameters
+        ----------
+        step : int, optional
+            Specific pipeline step to get support from. If None, returns
+            final selected feature indices.
+            
+        Returns
+        -------
+        support : ndarray
+            Indices of selected features.
+        """
         if step == None:
             return self.pipeline[0].get_support()[
                 self.pipeline[-2].get_support(indices=True)[self.pipeline[-1].indices]
@@ -227,6 +499,19 @@ class MESA_modality:
             return self.pipeline[step].get_support(indices=True)
 
     def get_params(self, deep=True):
+        """
+        Get parameters of the MESA_modality instance.
+        
+        Parameters
+        ----------
+        deep : bool, default=True
+            If True, return parameters for this estimator and contained objects.
+            
+        Returns
+        -------
+        params : dict
+            Parameter names mapped to their values.
+        """
         return {
             "random_state": self.random_state,
             "boruta_estimator": self.boruta_estimator,
@@ -241,64 +526,88 @@ class MESA_modality:
 
 class MESA:
     """
+    Multi-modality Ensemble with Stacking Architecture for integrating multiple data modalities.
+    
+    MESA implements a stacking ensemble approach where multiple modalities (data types)
+    are processed independently by base modality estimators, and their outputs are
+    combined using a meta-estimator for final prediction.
 
     Parameters
     ----------
-    meta_estimator : estimator object
-        The meta-estimator to be used for stacking the base estimators.
+    modalities : list of estimators
+        List of base modality estimators, each responsible for processing one data modality.
+    meta_estimator : estimator object, default=LogisticRegression()
+        The meta-estimator used for combining outputs from base modalities.
     random_state : int, default=0
-        The seed used by the random number generator.
-    cv : cross-validation generator, default=StratifiedKFold(n_splits=5, shuffle=True, random_state=0)
-        The cross-validation splitting strategy.
-    **kwargs : additional keyword arguments
-        Additional parameters to set as attributes of the class.
-
-    Methods
-    -------
-    fit(modalities, X_list, y)
-        Fit the model to the training data.
-    predict(X_list_test)
-        Predict the class labels for the provided data.
-    predict_proba(X_list_test)
-        Predict class probabilities for the provided data.
+        Random seed for reproducibility.
+    cv : cross-validation generator, default=RepeatedStratifiedKFold(n_splits=5, n_repeats=10, random_state=0)
+        Cross-validation strategy for generating meta-features.
+    **kwargs : dict
+        Additional parameters to set as attributes.
 
     Attributes
     ----------
-    meta_estimator : estimator object
-        The meta-estimator used for stacking.
-    random_state : int
-        The seed used by the random number generator.
-    cv : cross-validation generator
-        The cross-validation splitting strategy.
     modalities : list
-        List of modalities (base estimators).
-    base_estimators : list
-        List of fitted base estimators.
+        List of fitted base modality estimators.
+    meta_estimator : estimator
+        Fitted meta-estimator for final predictions.
     splits : list
-        List of train-test indices for cross-validation.
+        Cross-validation train/test index pairs used for meta-feature generation.
+
+    Methods
+    -------
+    fit(X_list, y)
+        Fit all modality estimators and the meta-estimator.
+    predict(X_list_test)
+        Predict class labels using the ensemble.
+    predict_proba(X_list_test)
+        Predict class probabilities using the ensemble.
+    get_support(step=None)
+        Get feature support information from all modalities.
+        
+    Examples
+    --------
+    >>> from sklearn.linear_model import LogisticRegression
+    >>> modalities = [MESA_modality(), MESA_modality()]
+    >>> meta_est = LogisticRegression()
+    >>> mesa = MESA(modalities, meta_est)
+    >>> mesa.fit([X1_train, X2_train], y_train)
+    >>> predictions = mesa.predict([X1_test, X2_test])
     """
 
     def __init__(
         self,
-        meta_estimator,
+        modalities,
+        meta_estimator=LogisticRegression(),
         random_state=0,
-        cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=0),
+        cv=RepeatedStratifiedKFold(n_splits=5, n_repeats=10, random_state=0),
         **kwargs
     ):
         self.meta_estimator = meta_estimator
         self.random_state = random_state
+        self.modalities = modalities
         self.cv = cv
         for key, value in kwargs.items():
             setattr(self, key, value)
-        pass
-
-    def _internal_cv(self, X, y, base_estimator, train_index, test_index):
-        X_train, X_test = X[train_index, :], X[test_index, :]
-        return base_estimator.fit(X_train, np.array(y)[train_index]).predict_proba(
-            X_test
-        )
 
     def _base_fit(self, X, y, base_estimator):
+        """
+        Generate meta-features using cross-validation for a single modality.
+        
+        Parameters
+        ----------
+        X : array-like
+            Transformed feature matrix for one modality.
+        y : array-like
+            Target values.
+        base_estimator : estimator
+            Base estimator for this modality.
+            
+        Returns
+        -------
+        base_probability : ndarray
+            Cross-validated probability predictions for meta-learning.
+        """
         def _internal_cv(train_index, test_index):
             X_train, X_test = X[train_index, :], X[test_index, :]
             return (
@@ -315,9 +624,24 @@ class MESA:
         )
         return base_probability
 
-    def fit(self, modalities, X_list, y):
+    def fit(self, X_list, y):
+        """
+        Fit all modality estimators and the meta-estimator.
+        
+        Parameters
+        ----------
+        X_list : list of array-like
+            List of feature matrices, one for each modality.
+        y : array-like of shape (n_samples,)
+            Target values.
+            
+        Returns
+        -------
+        self : object
+            Returns the fitted instance.
+        """
         # add check parameters
-        self.modalities = modalities
+        self.modalities = [m.fit(X, y) for m, X in zip(self.modalities, X_list)]
         self.splits = [
             (train_index, test_index)
             for train_index, test_index in self.cv.split(X_list[0], y)
@@ -327,153 +651,130 @@ class MESA:
         )
         base_probability = np.hstack(
             [
-                self._base_fit(m.transform(X), y, clone(m.classifier))  ########
-                for m, X in zip(modalities, X_list)
+                self._base_fit(m.transform(X), y, clone(m.classifier))
+                for m, X in zip(self.modalities, X_list)
             ]
         )
-        # self.base_estimators = [m.classifier for m in modalities]
         self.meta_estimator.fit(base_probability, y_stacking)
         return self
 
     def predict(self, X_list_test):
+        """
+        Predict class labels using the fitted ensemble.
+        
+        Parameters
+        ----------
+        X_list_test : list of array-like
+            List of test feature matrices, one for each modality.
+            
+        Returns
+        -------
+        y_pred : ndarray
+            Predicted class labels.
+        """
         base_probability_test = np.hstack(
             [m.transform_predict_proba(X) for m, X in zip(self.modalities, X_list_test)]
         )
         return self.meta_estimator.predict(base_probability_test)
 
     def predict_proba(self, X_list_test):
+        """
+        Predict class probabilities using the fitted ensemble.
+        
+        Parameters
+        ----------
+        X_list_test : list of array-like
+            List of test feature matrices, one for each modality.
+            
+        Returns
+        -------
+        y_proba : ndarray
+            Predicted class probabilities.
+        """
         base_probability_test = np.hstack(
             [m.transform_predict_proba(X) for m, X in zip(self.modalities, X_list_test)]
         )
         return self.meta_estimator.predict_proba(base_probability_test)
 
-
-# Code for missing value imputation and dataset splitting
-
-
-def cv_preprocessing(X, train_index, test_index, ratio=1, normalization=False):
-    """
-    Parameters
-    ----------
-    X : dataframe of shape (n_features, n_samples)
-        Input samples.
-    train_index : list/array/tuple of
-        The training set indices for the LOO split.
-    test_index : list/array/tuple of
-        The testing set indices for the LOO split.
-    ratio : float, default = 1
-        The threshold for feature filtering. Only features have valid values for > (ratio*samples) are kept and then imputed.
-    normalization: boolean, default = False
-        If scale dataset witt normalizer during preprocessing
-    Returns
-    ----------
-    X_train_cleaned : dataframe of shape (n_train_samples, n_features)
-        Cleaned, missing-value-imputed training set.
-    X_test_cleaned :dataframe of shape (n_test_samples, n_features)
-        Cleaned, missing-value-imputed testing datasets.
-    """
-    X_temp = X
-    X_train_temp, X_test_temp = X_temp.iloc[train_index, :], X_temp.iloc[test_index, :]
-    X_train_seleted = np.where(
-        X_train_temp.count(axis="rows") >= X_train_temp.shape[0] * ratio
-    )[0]
-    imputer = SimpleImputer(strategy="mean")
-    if normalization:
-        scaler = Normalizer()
-        X_train_cleaned = pd.DataFrame(
-            scaler.fit_transform(
-                imputer.fit_transform(X_train_temp.iloc[:, X_train_seleted].values)
-            )
-        )
-        X_test_cleaned = pd.DataFrame(
-            scaler.transform(
-                imputer.transform(X_test_temp.iloc[:, X_train_seleted].values)
-            )
-        )
-    else:
-        X_train_cleaned = pd.DataFrame(
-            imputer.fit_transform(X_train_temp.iloc[:, X_train_seleted].values)
-        )
-        X_test_cleaned = pd.DataFrame(
-            imputer.transform(X_test_temp.iloc[:, X_train_seleted].values)
-        )
-    X_train_cleaned.index, X_test_cleaned.index = (
-        X_temp.index[train_index],
-        X_temp.index[test_index],
-    )  # put Sample ID back
-    X_train_cleaned.columns, X_test_cleaned.columns = (
-        X.columns[X_train_seleted],
-        X.columns[X_train_seleted],
-    )
-    return X_train_cleaned, X_test_cleaned
+    def get_support(self, step=None):
+        """
+        Get feature support information from all modalities.
+        
+        Parameters
+        ----------
+        step : int, optional
+            Specific pipeline step to get support from. If None, returns
+            final selected features from all modalities.
+            
+        Returns
+        -------
+        support : list
+            List of feature support arrays, one for each modality.
+        """
+        if step == None:
+            return [
+                m.pipeline[0].get_support()[
+                    m.pipeline[-2].get_support(indices=True)[m.pipeline[-1].indices]
+                ]
+                for m in self.modalities
+            ]
+        else:
+            return [m.pipeline[step].get_support(indices=True) for m in self.modalities]
 
 
 class MESA_CV:
     """
-    A class used to perform cross-validation for the MESA model.
+    Cross-validation wrapper for MESA models with performance evaluation.
+    
+    This class provides cross-validation functionality for both single modality
+    and multi-modality MESA models, with built-in performance metrics calculation.
+
+    Parameters
+    ----------
+    modality : estimator object
+        The modality estimator to evaluate. Can be MESA_modality for single modality
+        or MESA for multi-modality evaluation.
+    random_state : int, default=0
+        Random seed for reproducibility.
+    cv : cross-validation generator, default=StratifiedKFold(n_splits=5, shuffle=True, random_state=0)
+        Cross-validation splitting strategy.
+    **kwargs : dict
+        Additional parameters to set as attributes.
 
     Attributes
     ----------
-    random_state : int
-        Random seed for reproducibility.
-    cv : StratifiedKFold
-        Cross-validation splitting strategy.
-    selector : GenericUnivariateSelect
-        Feature selection method.
-    boruta_est : RandomForestClassifier
-        Estimator used for Boruta feature selection.
-    classifier : RandomForestClassifier
-        Classifier used for training.
-    variance_threshold : float
-        Threshold for variance-based feature selection.
-    top_n : int
-        Number of top features to select.
-    kwargs : dict
-        Additional keyword arguments.
+    cv_result : list
+        Results from cross-validation iterations, stored as (y_pred, y_true) tuples.
+    modality : estimator
+        The modality estimator being evaluated.
 
     Methods
     -------
-    _cv_iter(X, y, train_index, test_index, missing_ratio, normalization, variance_threshold, proba=True)
-        Perform a single iteration of cross-validation for a single modality.
-    _cv_iter_mesa(X, y, train_index, test_index, missing_ratio, normalization, variance_threshold, proba=True)
-        Perform a single iteration of cross-validation for multiple modalities.
     fit(X, y)
-        Fit the model using cross-validation.
+        Perform cross-validation on the provided data.
     get_performance()
-        Calculate the performance of the model using ROC AUC score.
+        Calculate and return the mean ROC AUC score across CV folds.
+        
+    Examples
+    --------
+    >>> modality = MESA_modality()
+    >>> cv_eval = MESA_CV(modality, cv=StratifiedKFold(n_splits=10))
+    >>> cv_eval.fit(X, y)
+    >>> auc_score = cv_eval.get_performance()
     """
 
     def __init__(
         self,
+        modality,
         random_state=0,
         cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=0),
-        selector=GenericUnivariateSelect(
-            score_func=wilcoxon, mode="k_best", param=2000
-        ),
-        boruta_est=RandomForestClassifier(random_state=0, n_jobs=-1),
-        classifier=RandomForestClassifier(random_state=0, n_jobs=-1),
-        normalization=False,
-        variance_threshold=0,
-        top_n=100,
-        missing=0.1,
-        **kwargs  # meta_estimator=RandomForestClassifier(random_state=0, n_jobs=-1),
+        **kwargs
     ):
-        # self.meta_estimator = meta_estimator
         self.random_state = random_state
         self.cv = cv
-        self.seletor = selector
-        self.top_n = top_n
-        self.kwargs = kwargs
-        self.boruta_est = boruta_est
-        self.classifier = classifier
-        self.missing = missing
-        self.normalization = normalization
-        self.variance_threshold = (
-            variance_threshold  # todo: consider situation when have multiple modalities
-        )
+        self.modality = modality
         for key, value in kwargs.items():
             setattr(self, key, value)
-        pass
 
     def _cv_iter(
         self,
@@ -481,102 +782,99 @@ class MESA_CV:
         y,
         train_index,
         test_index,
-        missing_ratio,
-        normalization,
-        variance_threshold,
-        selector,
         proba=True,
+        return_feature_in=False,
+        mesa=False
     ):
-        X_train, X_test = cv_preprocessing(
-            X, train_index, test_index, 1 - missing_ratio, normalization
-        )
-        # X_train, X_test = X_train.values, X_test.values
+        """
+        Perform a single iteration of cross-validation.
+        
+        Parameters
+        ----------
+        X : array-like or list of array-like
+            Feature data. Single array for single modality, list for multi-modality.
+        y : array-like
+            Target values.
+        train_index : array-like
+            Indices for training samples.
+        test_index : array-like
+            Indices for test samples.
+        proba : bool, default=True
+            Whether to return probabilities (True) or class predictions (False).
+        return_feature_in : bool, default=False
+            Whether to return feature selection information.
+        mesa : bool, default=False
+            Whether this is multi-modality (True) or single modality (False).
+            
+        Returns
+        -------
+        y_pred : ndarray
+            Predictions for test samples.
+        y_test : ndarray
+            True labels for test samples.
+        support : ndarray, optional
+            Feature selection support (only if return_feature_in=True).
+        """
+        if mesa:
+            X_train = []
+            X_test = []
+            for X_temp in X:
+                X_train.append(X_temp.iloc[train_index, :])
+                X_test.append(X_temp.iloc[test_index, :])
+        else:
+            X_train, X_test = X.iloc[train_index, :], X.iloc[test_index, :]
+        
         y_train, y_test = np.array(y)[train_index], np.array(y)[test_index]
 
-        modality = MESA_modality(
-            selector=selector,
-            random_state=self.random_state,
-            top_n=self.top_n,
-            missing=0,
-            classifier=self.classifier,
-            boruta_estimator=self.boruta_est,
-            normalization=False,
-            variance_threshold=variance_threshold,
-        )
+        modality = clone(self.modality)
         if proba:
             y_pred = modality.fit(X_train, y_train).transform_predict_proba(X_test)
         else:
             y_pred = modality.fit(X_train, y_train).transform_predict(X_test)
-        return y_pred, y_test, modality.get_support()
-
-    def _cv_iter_mesa(
-        self,
-        X,
-        y,
-        train_index,
-        test_index,
-        missing_ratio,
-        normalization,
-        variance_threshold,
-        selector,
-        proba=True,
-    ):
-        temp = [
-            cv_preprocessing(
-                X_, train_index, test_index, 1 - missing_ratio, normalization
-            )
-            for X_ in X
-        ]
-        X_train = [_[0] for _ in temp]
-        X_test = [_[1] for _ in temp]
-        del temp
-        y_train, y_test = np.array(y)[train_index], np.array(y)[test_index]
-
-        modalities = [
-            MESA_modality(
-                selector=clone(selector),
-                random_state=self.random_state,
-                top_n=self.top_n,
-                missing=0,
-                classifier=clone(self.classifier),
-                boruta_estimator=self.boruta_est,
-                normalization=False,
-                variance_threshold=variance_threshold,
-            ).fit(X_train_, y_train)
-            for X_train_ in X_train
-        ]
-        mesa = MESA(
-            meta_estimator=self.meta_estimator, random_state=self.random_state
-        ).fit(
-            modalities, X_train, y_train
-        )  # ValueError: X has 95986 features, but GenericUnivariateSelect is expecting 25545 features as input.
-
-        if proba:
-            y_pred = mesa.predict_proba(X_test)
+        
+        if return_feature_in:
+            return y_pred, y_test, modality.get_support()
         else:
-            y_pred = mesa.predict(X_test)
-        return y_pred, y_test
+            return y_pred, y_test
 
     def fit(self, X, y):
-        slctr = clone(self.seletor)
+        """
+        Perform cross-validation on the provided data.
+        
+        Parameters
+        ----------
+        X : array-like or list of array-like
+            Feature data. Can be:
+            - Single DataFrame/array for single modality evaluation
+            - List of DataFrames/arrays for multi-modality evaluation
+        y : array-like of shape (n_samples,)
+            Target values.
+            
+        Returns
+        -------
+        self : object
+            Returns the fitted instance with cv_result attribute populated.
+            
+        Raises
+        ------
+        ValueError
+            If X format doesn't match the modality type.
+        """
         if (
-            isinstance(X, Sequence) and not isinstance(X, str) and len(X) > 1
-        ):  # multiple modalities
-            disp_mesa("Mutiple modalities input")
+            isinstance(X, Sequence) 
+            and not isinstance(X, str) 
+            and len(X) > 1
+        ) and (isinstance(self.modality, MESA)):  # multiple modalities
+            disp_mesa("Multiple modalities input")
             self.cv_result = Parallel(n_jobs=-1)(
-                delayed(self._cv_iter_mesa)(
+                delayed(self._cv_iter)(
                     X,
                     y,
                     train_index,
                     test_index,
-                    self.missing,
-                    self.normalization,
-                    self.variance_threshold,
-                    slctr,
+                    mesa=True
                 )
-                for train_index, test_index in self.cv.split(
-                    X[0], y
-                )  # check if all X_ is have the same sample index
+                for train_index, test_index in self.cv.split(X[0], y)
             )
         elif isinstance(X, (pd.DataFrame, np.ndarray)):  # single modality
             disp_mesa("Single modality input")
@@ -586,22 +884,48 @@ class MESA_CV:
                     y,
                     train_index,
                     test_index,
-                    self.missing,
-                    self.normalization,
-                    self.variance_threshold,
-                    slctr,
+                    mesa=False
                 )
                 for train_index, test_index in self.cv.split(X, y)
             )
         else:
             raise ValueError(
-                "X should be a list of modality matrixs or a single modality matrix"
+                "X should be a list of modality matrices or a single modality matrix"
             )
         return self
 
     def get_performance(self):
-        y_pred = [_[0][:, 1] for _ in self.cv_result]
-        y_true = [_[1] for _ in self.cv_result]
-        return np.array(
-            [roc_auc_score(y_true[_], y_pred[_]) for _ in range(len(y_true))]
-        ).mean()
+        """
+        Calculate the mean ROC AUC score across all cross-validation folds.
+        
+        Returns
+        -------
+        performance : float
+            Mean ROC AUC score across all CV folds.
+            
+        Raises
+        ------
+        ValueError
+            If fit() has not been called yet.
+            
+        Notes
+        -----
+        For LeaveOneOut CV, returns single AUC score. For other CV strategies,
+        returns the mean AUC across all folds.
+        """
+        if self.cv_result == None:
+            raise ValueError("You need to call the fit(X, y) method first.")
+        
+        # Import LeaveOneOut here to avoid circular imports
+        from sklearn.model_selection import LeaveOneOut
+        
+        if isinstance(self.cv, LeaveOneOut):
+            y_pred = [_[0][:, 1][0] for _ in self.cv_result]
+            y_true = [_[1][0] for _ in self.cv_result]
+            return roc_auc_score(y_true, y_pred)
+        else:
+            y_pred = [_[0][:, 1] for _ in self.cv_result]
+            y_true = [_[1] for _ in self.cv_result]
+            return np.array(
+                [roc_auc_score(y_true[_], y_pred[_]) for _ in range(len(y_true))]
+            ).mean()
