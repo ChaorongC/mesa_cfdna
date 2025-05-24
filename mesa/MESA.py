@@ -641,7 +641,7 @@ class MESA:
             Returns the fitted instance.
         """
         # add check parameters
-        #self.modalities = [m.fit(X, y) for m, X in zip(self.modalities, X_list)]
+        self.modalities = [clone(m).fit(X, y) for m, X in zip(self.modalities, X_list)]
         for m, X in zip(self.modalities, X_list):
             m.fit(X, y_train)
         self.splits = [
