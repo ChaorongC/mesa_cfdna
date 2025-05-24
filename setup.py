@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 
 setup(name='mesa_cfdna',
-      version='0.4.0',
+      version='0.3.0',
       description='Multimodal Epigenetic Sequencing Analysis (MESA) is a flexible and sensitive method of capturing and integrating multimodal epigenetic information of cfDNA using a single experimental assay.',
       url='https://github.com/ChaorongC/mesa_cfdna',
       author='Chaorong Chen',
