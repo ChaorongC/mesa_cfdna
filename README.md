@@ -2,6 +2,8 @@
 
 A flexible and sensitive method for capturing and integrating multimodal epigenetic information from cell-free DNA (cfDNA) using a single experimental assay.
 
+> Check demo.ipynd for the example.
+
 ## Overview
 
 MESA (Multimodal Epigenetic Sequencing Analysis) provides a comprehensive framework for analyzing multimodal epigenetic data from cfDNA. The package features a sklearn-compatible API that seamlessly integrates preprocessing, scaling, feature selection, model training, and cross-validation workflows.
