@@ -642,8 +642,6 @@ class MESA:
         """
         # add check parameters
         self.modalities = [clone(m).fit(X, y) for m, X in zip(self.modalities, X_list)]
-        for m, X in zip(self.modalities, X_list):
-            m.fit(X, y_train)
         self.splits = [
             (train_index, test_index)
             for train_index, test_index in self.cv.split(X_list[0], y)
