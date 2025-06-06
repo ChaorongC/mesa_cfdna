@@ -23,8 +23,9 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import Normalizer, StandardScaler
 from collections.abc import Sequence
 from sklearn.linear_model import LogisticRegression
+from typing import Union, Optional, List, Tuple, Any
 
-def disp_mesa(txt):
+def disp_mesa(txt: str) -> None:
     """
     Display a timestamped message to stderr for MESA logging.
     
@@ -36,7 +37,7 @@ def disp_mesa(txt):
     print("@%s \t%s" % (time.asctime(), txt), file=sys.stderr)
 
 
-def wilcoxon(X, y):
+def wilcoxon(X: np.ndarray, y: np.ndarray) -> np.ndarray:
     """
     Score function for feature selection using Wilcoxon rank-sum test.
 
@@ -98,7 +99,7 @@ class BorutaSelector(BorutaPy):
         super().__init__(**kwargs)
         self.n = n
 
-    def fit(self, X, y):
+    def fit(self, X: np.ndarray, y: np.ndarray) -> "BorutaSelector":
         """
         Fit the Boruta feature selection algorithm and select top n features.
         
@@ -118,7 +119,7 @@ class BorutaSelector(BorutaPy):
         self.indices = np.argsort(self.ranking_)[: self.n]
         return self
 
-    def transform(self, X):
+    def transform(self, X: Union[np.ndarray, pd.DataFrame]) -> Union[np.ndarray, pd.DataFrame]:
         """
         Transform data to contain only the selected top n features.
         
@@ -146,7 +147,7 @@ class BorutaSelector(BorutaPy):
         except:
             return X[:, self.indices]
 
-    def get_support(self):
+    def get_support(self) -> np.ndarray:
         """
         Get indices of the selected features.
         
@@ -196,7 +197,7 @@ class missing_value_processing:
         self.ratio = ratio
         self.imputer = imputer
 
-    def fit(self, X, y=None):
+    def fit(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> "missing_value_processing":
         """
         Fit the missing value processor by identifying valid features and fitting imputer.
         
@@ -228,7 +229,7 @@ class missing_value_processing:
         else:
             raise ValueError("The ratio of valid values should be greater than 0.")
 
-    def transform(self, X):
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
         """
         Transform data by removing high-missing features and imputing remaining values.
         
@@ -256,7 +257,7 @@ class missing_value_processing:
         else:
             raise ValueError("The ratio of valid values should be greater than 0.")
 
-    def get_support(self):
+    def get_support(self) -> np.ndarray:
         """
         Get indices of features that passed the missing value filter.
         
@@ -362,7 +363,7 @@ class MESA_modality:
         for key, value in kwargs.items():
             setattr(self, key, value)
 
-    def fit(self, X, y):
+    def fit(self, X: Union[pd.DataFrame, np.ndarray], y: Union[pd.Series, np.ndarray]) -> "MESA_modality":
         """
         Fit the complete preprocessing pipeline and classifier.
         
@@ -396,7 +397,7 @@ class MESA_modality:
         self.classifier = self.classifier.fit(self.pipeline.transform(X), y)
         return self
 
-    def transform(self, X):
+    def transform(self, X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
         """
         Apply the preprocessing pipeline to data.
         
@@ -412,7 +413,7 @@ class MESA_modality:
         """
         return self.pipeline.transform(X)
 
-    def predict(self, X):
+    def predict(self, X: np.ndarray) -> np.ndarray:
         """
         Predict class labels for preprocessed data.
         
@@ -428,7 +429,7 @@ class MESA_modality:
         """
         return self.classifier.predict(X)
 
-    def predict_proba(self, X):
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
         """
         Predict class probabilities for preprocessed data.
         
@@ -444,7 +445,7 @@ class MESA_modality:
         """
         return self.classifier.predict_proba(X)
 
-    def transform_predict(self, X):
+    def transform_predict(self, X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
         """
         Apply preprocessing pipeline and predict class labels.
         
@@ -460,7 +461,7 @@ class MESA_modality:
         """
         return self.classifier.predict(self.pipeline.transform(X))
 
-    def transform_predict_proba(self, X):
+    def transform_predict_proba(self, X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
         """
         Apply preprocessing pipeline and predict class probabilities.
         
@@ -476,7 +477,7 @@ class MESA_modality:
         """
         return self.classifier.predict_proba(self.pipeline.transform(X))
 
-    def get_support(self, step=None):
+    def get_support(self, step: Optional[int] = None) -> np.ndarray:
         """
         Get indices of features selected by pipeline components.
         
@@ -498,7 +499,7 @@ class MESA_modality:
         else:
             return self.pipeline[step].get_support(indices=True)
 
-    def get_params(self, deep=True):
+    def get_params(self, deep: bool = True) -> dict:
         """
         Get parameters of the MESA_modality instance.
         
@@ -590,7 +591,7 @@ class MESA:
         for key, value in kwargs.items():
             setattr(self, key, value)
 
-    def _base_fit(self, X, y, base_estimator):
+    def _base_fit(self, X: np.ndarray, y: Union[pd.Series, np.ndarray], base_estimator: Any) -> np.ndarray:
         """
         Generate meta-features using cross-validation for a single modality.
         
@@ -624,7 +625,7 @@ class MESA:
         )
         return base_probability
 
-    def fit(self, X_list, y):
+    def fit(self, X_list: List[Union[pd.DataFrame, np.ndarray]], y: Union[pd.Series, np.ndarray]) -> "MESA":
         """
         Fit all modality estimators and the meta-estimator.
         
@@ -658,7 +659,7 @@ class MESA:
         self.meta_estimator.fit(base_probability, y_stacking)
         return self
 
-    def predict(self, X_list_test):
+    def predict(self, X_list_test: List[Union[pd.DataFrame, np.ndarray]]) -> np.ndarray:
         """
         Predict class labels using the fitted ensemble.
         
@@ -677,7 +678,7 @@ class MESA:
         )
         return self.meta_estimator.predict(base_probability_test)
 
-    def predict_proba(self, X_list_test):
+    def predict_proba(self, X_list_test: List[Union[pd.DataFrame, np.ndarray]]) -> np.ndarray:
         """
         Predict class probabilities using the fitted ensemble.
         
@@ -696,7 +697,7 @@ class MESA:
         )
         return self.meta_estimator.predict_proba(base_probability_test)
 
-    def get_support(self, step=None):
+    def get_support(self, step: Optional[int] = None) -> List[np.ndarray]:
         """
         Get feature support information from all modalities.
         
@@ -778,14 +779,17 @@ class MESA_CV:
 
     def _cv_iter(
         self,
-        X,
-        y,
-        train_index,
-        test_index,
-        proba=True,
-        return_feature_in=False,
-        mesa=False
-    ):
+        X: Union[pd.DataFrame, List[pd.DataFrame]],
+        y: Union[pd.Series, np.ndarray],
+        train_index: np.ndarray,
+        test_index: np.ndarray,
+        proba: bool = True,
+        return_feature_in: bool = False,
+        mesa: bool = False
+    ) -> Union[
+        Tuple[np.ndarray, np.ndarray],
+        Tuple[np.ndarray, np.ndarray, Any]
+    ]:
         """
         Perform a single iteration of cross-validation.
         
@@ -837,7 +841,7 @@ class MESA_CV:
         else:
             return y_pred, y_test
 
-    def fit(self, X, y):
+    def fit(self, X: Union[pd.DataFrame, List[pd.DataFrame]], y: Union[pd.Series, np.ndarray]) -> "MESA_CV":
         """
         Perform cross-validation on the provided data.
         
@@ -894,7 +898,7 @@ class MESA_CV:
             )
         return self
 
-    def get_performance(self):
+    def get_performance(self) -> float:
         """
         Calculate the mean ROC AUC score across all cross-validation folds.
         
