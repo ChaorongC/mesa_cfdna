@@ -142,20 +142,42 @@ This step is useful when neighboring or highly correlated features carry redunda
 
 ## Key Parameters
 
-For `MESA_modality`:
-- `task`: `"classification"` or `"regression"`
-- `top_n`: number of Boruta-selected features to keep
-- `missing`: allowed missing fraction per feature
-- `variance_threshold`: minimum variance after imputation
-- `normalization`: whether to apply `Normalizer()`
-- `selector`: integer or sklearn-compatible univariate selector
-- `predictor`: final estimator
-- `boruta_estimator`: estimator used inside Boruta
+### `MESA_modality` parameters
 
-For `MESA_CV`:
-- classification default metric: ROC AUC
-- regression default metric: R²
-- supported regression metrics: `r2`, `neg_mean_squared_error`, `neg_root_mean_squared_error`, `pearson`, `spearman`
+- `task`: learning task, either `"classification"` or `"regression"`.
+- `random_state`: random seed used by the default task-aware estimators.
+- `boruta_estimator`: estimator used inside Boruta. If omitted, MESA uses a task-aware random forest.
+- `top_n`: number of Boruta-selected features retained in the final modality model.
+- `variance_threshold`: threshold passed to `VarianceThreshold` after missing-value handling.
+- `normalization`: whether to insert `Normalizer()` before variance filtering.
+- `missing`: maximum missing fraction tolerated per feature before that feature is removed.
+- `redundancy_pruning`: optional correlated-feature pruning strategy, either `None`, `"score"`, or `"model"`.
+- `redundancy_threshold`: absolute correlation threshold used to define redundant feature blocks.
+- `redundancy_method`: correlation method used during redundancy pruning, for example `"pearson"`.
+- `redundancy_estimator`: estimator used to rank features within correlated blocks in `"model"` mode.
+- `redundancy_cv`: cross-validation strategy used by model-based redundancy pruning.
+- `redundancy_metric`: optional task-aware metric used in model-based redundancy pruning.
+- `predictor`: final modality-level estimator. If omitted, MESA uses a task-aware random forest.
+- `classifier`: backward-compatible alias for `predictor`.
+- `selector`: first-stage univariate selector. An integer is interpreted as `k` in a `GenericUnivariateSelect`; `None` uses the task default.
+
+### `MESA` parameters
+
+- `modalities`: list of `MESA_modality` objects, one per modality.
+- `task`: shared learning task for every modality and the meta-estimator.
+- `meta_estimator`: second-level estimator fitted on modality outputs. If omitted, MESA uses logistic regression for classification and linear regression for regression.
+- `random_state`: random seed used by the default stacking cross-validation splitter.
+- `cv`: cross-validation splitter used to generate out-of-fold modality predictions for stacking.
+
+### `MESA_CV` parameters
+
+- `modality`: a `MESA_modality` or `MESA` object evaluated across folds.
+- `task`: learning task used for default splitting and scoring.
+- `random_state`: random seed used by the default cross-validation splitter.
+- `cv`: explicit cross-validation splitter. If omitted, MESA uses a task-aware default.
+- `performance_metric`: default metric returned by `get_performance()` when no explicit metric is supplied.
+
+Classification defaults to ROC AUC. Regression defaults to R². Supported regression metrics are `r2`, `neg_mean_squared_error`, `neg_root_mean_squared_error`, `pearson`, and `spearman`.
 
 ## Validation Assets
 

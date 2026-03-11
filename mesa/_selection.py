@@ -19,23 +19,47 @@ from ._task_utils import (
 
 
 def wilcoxon(X, y):
-    """Score function for feature selection using Wilcoxon rank-sum test."""
+    """Score features with a Mann-Whitney/Wilcoxon rank-sum test.
+
+    Parameters
+    ----------
+    X : array-like
+        Feature matrix containing exactly two outcome groups.
+    y : array-like
+        Binary class labels aligned to ``X``.
+
+    Returns
+    -------
+    float or numpy.ndarray
+        Negative p-value style score used for ranking, where larger values
+        correspond to stronger class separation.
+    """
     return -mannwhitneyu(X[y == 0], X[y == 1])[1]
 
 
 class BorutaSelector(BorutaPy):
-    """Select the top-n Boruta-ranked features."""
+    """Select the top ``n`` Boruta-ranked features.
+
+    Parameters
+    ----------
+    n : int, default=10
+        Number of Boruta-ranked features retained after fitting.
+    **kwargs
+        Additional keyword arguments passed to ``boruta.BorutaPy``.
+    """
 
     def __init__(self, n=10, **kwargs):
         super().__init__(**kwargs)
         self.n = n
 
     def fit(self, X, y):
+        """Fit Boruta and retain the indices of the top-ranked features."""
         super().fit(X, y)
         self.indices = np.argsort(self.ranking_)[: self.n]
         return self
 
     def transform(self, X):
+        """Subset the input matrix to the retained Boruta features."""
         try:
             self.ranking_
         except AttributeError as exc:
@@ -46,17 +70,27 @@ class BorutaSelector(BorutaPy):
             return X[:, self.indices]
 
     def get_support(self):
+        """Return retained feature indices in the post-Boruta input space."""
         return self.indices
 
 
 class missing_value_processing:
-    """Filter columns by missingness and impute remaining values."""
+    """Filter features by missingness and impute remaining values.
+
+    Parameters
+    ----------
+    ratio : float, default=0.9
+        Minimum fraction of non-missing values required to retain a feature.
+    imputer : sklearn-compatible imputer, default=SimpleImputer(strategy="mean")
+        Imputer fitted on the retained columns.
+    """
 
     def __init__(self, ratio=0.9, imputer=SimpleImputer(strategy="mean")):
         self.ratio = ratio
         self.imputer = imputer
 
     def fit(self, X, y=None):
+        """Learn retained columns and fit the imputer on those columns."""
         if self.ratio <= 0:
             raise ValueError("The ratio of valid values should be greater than 0.")
         self.indices = np.where(
@@ -66,6 +100,7 @@ class missing_value_processing:
         return self
 
     def transform(self, X):
+        """Apply the learned missing-value filter and imputation step."""
         if self.ratio <= 0:
             raise ValueError("The ratio of valid values should be greater than 0.")
         return pd.DataFrame(
@@ -75,11 +110,31 @@ class missing_value_processing:
         )
 
     def get_support(self):
+        """Return retained feature indices after missing-value filtering."""
         return self.indices
 
 
 class RedundancyPruner:
-    """Remove highly correlated features by keeping one representative per block."""
+    """Remove highly correlated features by keeping one representative per block.
+
+    Parameters
+    ----------
+    mode : {None, "score", "model"}, default=None
+        Redundancy-pruning strategy. ``None`` disables pruning.
+    threshold : float, default=0.95
+        Absolute correlation threshold used to define redundant feature blocks.
+    method : str, default="pearson"
+        Correlation method passed to ``pandas.DataFrame.corr``.
+    task : str, default="classification"
+        Learning task used to choose scoring behavior.
+    estimator : sklearn-compatible estimator or None, default=None
+        Estimator used in ``mode="model"`` to rank features within correlated
+        blocks.
+    cv : int or cross-validator, default=3
+        Cross-validation strategy used in ``mode="model"``.
+    metric : str or None, default=None
+        Optional task-aware metric used in ``mode="model"``.
+    """
 
     def __init__(
         self,
@@ -100,6 +155,7 @@ class RedundancyPruner:
         self.metric = metric
 
     def _score_features(self, X_df, y):
+        """Compute task-aware univariate feature scores for pruning."""
         if self.task == REGRESSION:
             scores, _ = f_regression(X_df, y)
             return np.nan_to_num(scores, nan=-np.inf, neginf=-np.inf)
@@ -116,6 +172,7 @@ class RedundancyPruner:
         return scores
 
     def _model_feature_score(self, feature, y):
+        """Score a single feature with model-based cross-validation."""
         X_feature = np.asarray(feature).reshape(-1, 1)
         y_arr = np.asarray(y)
         if self.estimator is None:
@@ -152,12 +209,14 @@ class RedundancyPruner:
         return np.mean(fold_scores) if fold_scores else -np.inf
 
     def _model_scores(self, X_df, y):
+        """Compute model-based scores for every candidate feature."""
         return np.array(
             [self._model_feature_score(X_df.iloc[:, i], y) for i in range(X_df.shape[1])],
             dtype=float,
         )
 
     def fit(self, X, y=None):
+        """Identify one representative feature per correlated block."""
         self.task = validate_task(self.task)
         X_df = pd.DataFrame(X)
         n_features = X_df.shape[1]
@@ -198,6 +257,7 @@ class RedundancyPruner:
         return self
 
     def transform(self, X):
+        """Subset the input matrix to the retained non-redundant features."""
         if not hasattr(self, "indices"):
             raise ValueError("You need to call the fit(X, y) method first.")
         try:
@@ -206,6 +266,7 @@ class RedundancyPruner:
             return X[:, self.indices]
 
     def get_support(self, indices=False):
+        """Return selected features as indices or a boolean mask."""
         if not hasattr(self, "indices"):
             raise ValueError("You need to call the fit(X, y) method first.")
         if indices:
@@ -216,7 +277,18 @@ class RedundancyPruner:
 
 
 def get_support_indices(step):
-    """Return selected feature indices from heterogeneous selector APIs."""
+    """Return selected feature indices from heterogeneous selector APIs.
+
+    Parameters
+    ----------
+    step : object
+        Pipeline step exposing a ``get_support`` method.
+
+    Returns
+    -------
+    numpy.ndarray
+        Integer indices of retained features in the step input space.
+    """
     try:
         return step.get_support(indices=True)
     except TypeError:
