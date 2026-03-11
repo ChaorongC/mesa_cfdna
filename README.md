@@ -11,9 +11,9 @@ MESA (Multimodal Epigenetic Sequencing Analysis) provides a comprehensive framew
 ### Key Features
 
 - **Multimodal Integration**: Combine multiple epigenetic data modalities using ensemble stacking
-- **Advanced Feature Selection**: Boruta algorithm combined with univariate selection to keep a balance between computation time and biomarker discovery
+- **Advanced Feature Selection**: Univariate filtering, optional LD-style redundancy pruning, and Boruta selection to balance computation time and biomarker discovery
 - **Robust Cross-Validation**: Built-in evaluation framework with performance metrics for easy finetuning
-- **Flexible Pipeline**: Customizable preprocessing and classification components
+- **Flexible Pipeline**: Customizable preprocessing and classification/regression components
 - **Missing Value Handling**: Intelligent filtering and imputation strategies
 
 ## Installation
@@ -28,17 +28,18 @@ pip install mesa-cfdna
 ```python
 from mesa import MESA_modality, MESA, MESA_CV
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LinearRegression, LogisticRegression
 import pandas as pd
 
 # Load your data
 X_train, y_train = load_data()  # Your data loading function
 
 # Single modality analysis
-modality_1 = MESA_modality(top_n=50, classifier=RandomForestClassifier(random_state=0), variance_threshold=0, normalization=True)
+modality_1 = MESA_modality(top_n=50, predictor=RandomForestClassifier(random_state=0), variance_threshold=0, normalization=True)
 modality_1.fit(X_train, y_train)
 predictions = modality_1.transform_predict_proba(X_test)
 
-modality_2 = MESA_modality(top_n=100, classifier=LogisticRegression(random_state=0), variance_threshold=0, normalization=False, missing=0)
+modality_2 = MESA_modality(top_n=100, predictor=LogisticRegression(random_state=0), variance_threshold=0, normalization=False, missing=0)
 modality_2.fit(X_train, y_train)
 predictions = modality_2.transform_predict_proba(X_test)
 
@@ -47,6 +48,11 @@ modalities = [modality_1, modality_2]
 mesa = MESA(modalities)
 mesa.fit([X1_train, X2_train], y_train)
 mesa_predictions = mesa.predict_proba([X1_test, X2_test])
+
+# Regression
+reg_modality = MESA_modality(task="regression", predictor=LinearRegression(), top_n=50)
+reg_modality.fit(X_train, y_train_continuous)
+reg_predictions = reg_modality.transform_predict(X_test)
 ```
 
 ## API Reference
@@ -59,23 +65,31 @@ Single modality analysis with comprehensive preprocessing and feature selection 
 
 | Parameter              | Type          | Default                   | Description                                              |
 | ---------------------- | ------------- | ------------------------- | -------------------------------------------------------- |
+| `task`               | str           | `"classification"`        | Learning task: `"classification"` or `"regression"`      |
 | `top_n`              | int           | 100                       | Number of features to select using Boruta algorithm      |
 | `variance_threshold` | float         | 0                         | Minimum variance threshold for feature filtering         |
 | `normalization`      | bool          | False                     | Whether to apply L2 normalization                        |
 | `missing`            | float         | 0.1                       | Maximum proportion of missing values allowed per feature |
-| `classifier`         | estimator     | RandomForestClassifier()  | Final classifier for predictions                         |
-| `selector`           | int/estimator | GenericUnivariateSelect() | Univariate feature selector                              |
-| `boruta_estimator`   | estimator     | RandomForestClassifier()  | Base estimator for Boruta selection                      |
+| `redundancy_pruning` | str/None     | None                      | Redundancy strategy after the first selector: `score` or `model` |
+| `redundancy_threshold` | float      | 0.95                      | Absolute correlation threshold used to define redundant feature blocks |
+| `redundancy_method` | str           | "pearson"                 | Correlation method used when redundancy pruning is enabled |
+| `redundancy_estimator` | estimator/None | None                  | Estimator used to choose the representative feature in `model` mode |
+| `redundancy_cv` | int/cv splitter | 3                        | Cross-validation strategy used in `model` mode |
+| `redundancy_metric` | str/None      | task default              | Metric used by model-based redundancy pruning            |
+| `predictor`         | estimator/None | task default             | Final estimator for prediction                           |
+| `classifier`        | estimator/None | alias of `predictor`     | Backward-compatible alias for classification examples    |
+| `selector`          | int/estimator | task default selector     | Univariate feature selector                              |
+| `boruta_estimator`  | estimator/None | task default estimator   | Base estimator for Boruta selection                      |
 | `random_state`       | int           | 0                         | Random seed for reproducibility                          |
 
 #### Methods
 
-- `fit(X, y)`: Fit the preprocessing pipeline and classifier
+- `fit(X, y)`: Fit the preprocessing pipeline and predictor
 - `transform(X)`: Apply preprocessing pipeline only
-- `predict(X)`: Predict class labels for preprocessed data
-- `predict_proba(X)`: Predict class probabilities for preprocessed data
+- `predict(X)`: Predict labels or continuous values for preprocessed data
+- `predict_proba(X)`: Predict class probabilities in classification mode only
 - `transform_predict(X)`: Apply pipeline and predict in one step
-- `transform_predict_proba(X)`: Apply pipeline and predict probabilities
+- `transform_predict_proba(X)`: Apply pipeline and predict probabilities in classification mode only
 - `get_support(step=None)`: Get indices of selected features
 - `get_params(deep=True)`: Get model parameters
 
@@ -87,16 +101,17 @@ Multi-modality ensemble with stacking architecture for integrating multiple data
 
 | Parameter          | Type         | Default                   | Description                                 |
 | ------------------ | ------------ | ------------------------- | ------------------------------------------- |
+| `task`           | str          | `"classification"`        | Learning task shared by all modalities      |
 | `modalities`     | list         | Required                  | List of MESA_modality objects               |
-| `meta_estimator` | estimator    | LogisticRegression()      | Meta-learner for ensemble combination       |
+| `meta_estimator` | estimator    | task default              | Meta-learner for ensemble combination       |
 | `random_state`   | int          | 0                         | Random seed for reproducibility             |
-| `cv`             | cv generator | RepeatedStratifiedKFold() | Cross-validation strategy for meta-features |
+| `cv`             | cv generator | task default              | Cross-validation strategy for meta-features |
 
 #### Methods
 
 - `fit(X_list, y)`: Fit all modalities and meta-estimator
-- `predict(X_list_test)`: Predict class labels using ensemble
-- `predict_proba(X_list_test)`: Predict class probabilities using ensemble
+- `predict(X_list_test)`: Predict labels or continuous values using ensemble
+- `predict_proba(X_list_test)`: Predict class probabilities in classification mode only
 - `get_support(step=None)`: Get feature support from all modalities
 
 ### MESA_CV
@@ -108,13 +123,15 @@ Cross-validation wrapper for performance evaluation of MESA models.
 | Parameter        | Type         | Default                     | Description                              |
 | ---------------- | ------------ | --------------------------- | ---------------------------------------- |
 | `modality`     | estimator    | Required                    | MESA_modality or MESA object to evaluate |
+| `task`         | str          | `"classification"`          | Learning task used for scoring           |
 | `random_state` | int          | 0                           | Random seed for reproducibility          |
-| `cv`           | cv generator | StratifiedKFold(n_splits=5) | Cross-validation strategy                |
+| `cv`           | cv generator | task default                | Cross-validation strategy                |
+| `performance_metric` | str/None | task default              | Metric returned by `get_performance()`   |
 
 #### Methods
 
 - `fit(X, y)`: Perform cross-validation on provided data
-- `get_performance()`: Calculate mean ROC AUC score across CV folds
+- `get_performance(metric=None)`: Calculate the task-specific mean score across CV folds
 
 #### Attributes
 
@@ -140,8 +157,10 @@ y = pd.read_csv('labels.csv', index_col=0).values.ravel()
 modality = MESA_modality(
     top_n=50,
     missing=0.2,
+    redundancy_pruning="score",
+    redundancy_threshold=0.95,
     normalization=True,
-    classifier=RandomForestClassifier(n_estimators=100, random_state=42)
+    predictor=RandomForestClassifier(n_estimators=100, random_state=42)
 )
 
 # Fit the modality
@@ -166,6 +185,34 @@ auc_score = cv_eval.get_performance()
 print(f"Cross-validation AUC: {auc_score:.3f}")
 ```
 
+### Example 1b: Single Modality Regression
+
+```python
+import pandas as pd
+from mesa import MESA_modality, MESA_CV
+from sklearn.linear_model import LinearRegression
+
+X = pd.read_csv("methylation_data.csv", index_col=0)
+y = pd.read_csv("continuous_outcome.csv", index_col=0).values.ravel()
+
+modality = MESA_modality(
+    task="regression",
+    top_n=50,
+    predictor=LinearRegression(),
+    redundancy_pruning="score",
+    redundancy_threshold=0.95,
+)
+modality.fit(X, y)
+predictions = modality.transform_predict(X)
+
+cv_eval = MESA_CV(
+    modality=MESA_modality(task="regression", top_n=50, predictor=LinearRegression()),
+    task="regression",
+)
+cv_eval.fit(X, y)
+print(f"Cross-validation R2: {cv_eval.get_performance():.3f}")
+```
+
 ### Example 2: Multi-Modality Ensemble
 
 ```python
@@ -186,19 +233,19 @@ modalities = [
     MESA_modality(
         top_n=100,
         missing=0.1,
-        classifier=RandomForestClassifier(n_estimators=200, random_state=42),
+        predictor=RandomForestClassifier(n_estimators=200, random_state=42),
         normalization=True
     ),
     MESA_modality(
         top_n=80,
         missing=0.15,
-        classifier=SVC(probability=True, random_state=42),
+        predictor=SVC(probability=True, random_state=42),
         normalization=False
     ),
     MESA_modality(
         top_n=60,
         missing=0.2,
-        classifier=LogisticRegression(random_state=42),
+        predictor=LogisticRegression(random_state=42),
         normalization=True
     )
 ]
@@ -281,7 +328,7 @@ custom_modality = MESA_modality(
     missing=0.05,
     normalization=True,
     selector=SelectKBest(score_func=f_classif, k=1000),
-    classifier=GradientBoostingClassifier(n_estimators=100, random_state=42),
+    predictor=GradientBoostingClassifier(n_estimators=100, random_state=42),
     boruta_estimator=GradientBoostingClassifier(n_estimators=50, random_state=42)
 )
 
