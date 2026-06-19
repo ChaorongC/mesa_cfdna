@@ -85,10 +85,67 @@ mesa = MESA([modality_1, modality_2], random_state=42)
 mesa.fit([X1_train, X2_train], y_train)
 ensemble_proba = mesa.predict_proba([X1_test, X2_test])
 
+rank_blend = MESA(
+    [modality_1, modality_2],
+    integration_method="control_anchor_rank_blend",
+    integration_weights=[0.60, 0.40],
+    control_label=0,
+    random_state=42,
+)
+rank_blend.fit([X1_train, X2_train], y_train)
+rank_blend_proba = rank_blend.predict_proba([X1_test, X2_test])
+
 cv_eval = MESA_CV(MESA_modality(top_n=50, random_state=42))
 cv_eval.fit(X1_train, y_train)
 auc = cv_eval.get_performance()
 ```
+
+#### Control-anchored rank-blend integration
+
+`integration_method="control_anchor_rank_blend"` is a classification-only
+alternative to the default learned stacking meta-estimator. It was designed for
+settings where modality score calibration may differ across cohorts, but a
+fixed, interpretable rank-based fusion rule is preferred.
+
+During `fit()`, MESA first generates out-of-fold scores for every training
+sample in each modality. Out-of-fold means each training sample is scored by a
+model that was fit without that sample. For example, in 5-fold CV, a sample in
+fold 5 is scored by a model trained only on folds 1-4.
+
+MESA then builds one anchor distribution per modality using only training
+samples whose label equals `control_label`. These are the training-control
+anchors:
+
+```text
+anchor_m = out-of-fold methylation scores for training controls
+anchor_d = out-of-fold DELFI scores for training controls
+```
+
+For prediction, each new modality score is converted to a percentile rank
+relative to the corresponding frozen training-control anchor:
+
+```text
+percentile = (count(anchor < score) + 0.5 * count(anchor == score)) / len(anchor)
+```
+
+The final score is the fixed weighted average of the modality percentile ranks.
+With two modalities and `integration_weights=[0.60, 0.40]`:
+
+```text
+score = 0.60 * methylation_percentile + 0.40 * delfi_percentile
+```
+
+This procedure is leakage-free when `fit()` is called only on the training set
+for the current train/test split or cross-validation fold:
+
+- anchors are built only from samples passed to `fit()`;
+- each training-control anchor score is out-of-fold;
+- samples passed to `predict_proba()` are not used to construct anchors;
+- labels for test or external samples are not used by `predict_proba()`.
+
+Do not fit `MESA` on all samples and then report performance on those same
+samples; that would still be an invalid evaluation even though the internal
+anchors are out-of-fold.
 
 ### Regression
 
@@ -168,6 +225,9 @@ This step is useful when neighboring or highly correlated features carry redunda
 - `meta_estimator`: second-level estimator fitted on modality outputs. If omitted, MESA uses logistic regression for classification and linear regression for regression.
 - `random_state`: random seed used by the default stacking cross-validation splitter.
 - `cv`: cross-validation splitter used to generate out-of-fold modality predictions for stacking.
+- `integration_method`: multimodal integration strategy. `"stacking"` preserves the original learned meta-estimator behavior. `"control_anchor_rank_blend"` uses a classification-only fixed-weight blend of modality scores converted to empirical percentile ranks against out-of-fold training-control anchors.
+- `integration_weights`: per-modality weights for `"control_anchor_rank_blend"`. If omitted, equal weights are used. Weights must match the number of modalities, be non-negative, finite, and sum to 1.
+- `control_label`: class label used as the control group for `"control_anchor_rank_blend"` anchor distributions. Default is `0`.
 
 ### `MESA_CV` parameters
 

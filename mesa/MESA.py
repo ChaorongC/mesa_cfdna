@@ -306,22 +306,36 @@ class MESA_modality:
 
 
 class MESA:
-    """Multi-modality stacking model that integrates fitted MESA modalities.
+    """Multi-modality model that integrates fitted MESA modalities.
 
     Parameters
     ----------
     modalities : list of MESA_modality
-        Modality-specific estimators combined by stacked learning.
+        Modality-specific estimators combined by the requested integration
+        method.
     task : {"classification", "regression"}, default="classification"
         Shared learning task for all modalities and the meta-estimator.
     meta_estimator : sklearn-compatible estimator or None, default=None
-        Estimator fitted on modality-level outputs. If ``None``, a task-aware
-        default is used.
+        Estimator fitted on modality-level outputs when
+        ``integration_method="stacking"``. If ``None``, a task-aware default is
+        used.
     random_state : int, default=0
         Random seed used by the default CV splitter.
     cv : cross-validator or None, default=None
         Splitter used to generate modality-level stacking features. If
         ``None``, a repeated task-aware splitter is used.
+    integration_method : {"stacking", "control_anchor_rank_blend"}, default="stacking"
+        Multimodal integration strategy. ``"stacking"`` preserves the original
+        MESA behavior. ``"control_anchor_rank_blend"`` is a classification-only
+        fixed-weight blend of modality scores transformed to empirical
+        percentile ranks against out-of-fold training-control anchors.
+    integration_weights : sequence of float or None, default=None
+        Per-modality weights used by ``"control_anchor_rank_blend"``. If
+        ``None``, equal weights are used. Provided weights must be finite,
+        non-negative, match the number of modalities, and sum to 1.
+    control_label : object, default=0
+        Class label used to define controls for control-anchor reference
+        distributions in ``"control_anchor_rank_blend"``.
     **kwargs
         Additional attributes attached to the instance.
     """
@@ -333,6 +347,9 @@ class MESA:
         meta_estimator=None,
         random_state=0,
         cv=None,
+        integration_method="stacking",
+        integration_weights=None,
+        control_label=0,
         **kwargs,
     ):
         self.task = validate_task(task)
@@ -342,6 +359,9 @@ class MESA:
         self.random_state = random_state
         self.modalities = modalities
         self.cv = default_cv(self.task, self.random_state, repeated=True) if cv is None else cv
+        self.integration_method = integration_method
+        self.integration_weights = integration_weights
+        self.control_label = control_label
         for key, value in kwargs.items():
             setattr(self, key, value)
 
@@ -360,6 +380,104 @@ class MESA:
             )
         )
 
+    def _fit_modality_oof_scores(self, X, y, modality):
+        """Generate end-to-end out-of-fold positive-class scores."""
+
+        def _internal_cv(train_index, test_index):
+            X_train, X_test = slice_rows(X, train_index), slice_rows(X, test_index)
+            fitted = clone(modality).fit(X_train, np.asarray(y)[train_index])
+            return self._positive_class_scores(fitted, X_test)
+
+        return np.hstack(
+            Parallel(n_jobs=-1, verbose=0)(
+                delayed(_internal_cv)(train_index, test_index)
+                for train_index, test_index in self.splits
+            )
+        )
+
+    def _validate_integration_method(self):
+        """Validate the requested multimodal integration method."""
+        valid = {"stacking", "control_anchor_rank_blend"}
+        if self.integration_method not in valid:
+            raise ValueError(
+                "integration_method should be one of: "
+                + ", ".join(f"'{method}'" for method in sorted(valid))
+                + "."
+            )
+
+    def _resolve_integration_weights(self):
+        """Validate and return fixed integration weights."""
+        n_modalities = len(self.modalities)
+        if self.integration_weights is None:
+            return np.repeat(1.0 / n_modalities, n_modalities)
+
+        weights = np.asarray(self.integration_weights, dtype=float)
+        if weights.shape != (n_modalities,):
+            raise ValueError("integration_weights should match the number of modalities.")
+        if not np.all(np.isfinite(weights)):
+            raise ValueError("integration_weights should contain only finite values.")
+        if np.any(weights < 0):
+            raise ValueError("integration_weights should be non-negative.")
+        if not np.isclose(weights.sum(), 1.0):
+            raise ValueError("integration_weights should sum to 1.")
+        return weights
+
+    def _validate_control_anchor_labels(self, y):
+        """Validate binary labels and return labels aligned to output columns."""
+        classes = np.unique(np.asarray(y))
+        if classes.size != 2:
+            raise ValueError("control_anchor_rank_blend requires exactly two classes.")
+        if self.control_label not in classes:
+            raise ValueError("control_label should be present in y.")
+        positive_label = classes[classes != self.control_label][0]
+        return np.asarray([self.control_label, positive_label])
+
+    @staticmethod
+    def _empirical_percentile(scores, reference):
+        """Midrank empirical percentile against a fixed reference distribution."""
+        scores = np.asarray(scores, dtype=float)
+        reference = np.asarray(reference, dtype=float)
+        if reference.size == 0:
+            raise ValueError("control-anchor reference distribution is empty.")
+        less = (reference[:, None] < scores[None, :]).sum(axis=0)
+        equal = (reference[:, None] == scores[None, :]).sum(axis=0)
+        return (less + 0.5 * equal) / reference.size
+
+    def _control_anchor_rank_scores(self, X_list_test):
+        """Return fixed-weight control-anchored rank-blend positive scores."""
+        modality_scores = [
+            self._positive_class_scores(modality, X)
+            for modality, X in zip(self.modalities, X_list_test)
+        ]
+        rank_scores = [
+            self._empirical_percentile(scores, anchor)
+            for scores, anchor in zip(modality_scores, self.control_anchor_scores_)
+        ]
+        return np.sum(
+            [
+                weight * score
+                for weight, score in zip(self.integration_weights_, rank_scores)
+            ],
+            axis=0,
+        )
+
+    def _positive_class_scores(self, modality, X):
+        """Return probabilities for the class opposite ``control_label``."""
+        if hasattr(modality, "transform_predict_proba"):
+            proba = modality.transform_predict_proba(X)
+            predictor = getattr(modality, "predictor_", None)
+        else:
+            proba = modality.predict_proba(X)
+            predictor = modality
+        predictor_classes = getattr(predictor, "classes_", None)
+        if predictor_classes is None:
+            return proba[:, 1]
+        positive_label = self.classes_[1]
+        matches = np.flatnonzero(np.asarray(predictor_classes) == positive_label)
+        if matches.size != 1:
+            raise ValueError("Could not identify positive class in modality predictor.")
+        return proba[:, matches[0]]
+
     def fit(self, X_list, y):
         """Fit all modalities and the second-level meta-estimator.
 
@@ -375,16 +493,40 @@ class MESA:
         MESA
             Fitted multimodal ensemble.
         """
+        self._validate_integration_method()
         ensure_estimator_matches_task(self.meta_estimator, self.task, "meta_estimator")
         for modality in self.modalities:
             if getattr(modality, "task", self.task) != self.task:
                 raise ValueError("All modalities should use the same task as MESA.")
 
-        self.modalities = [clone(m).fit(X, y) for m, X in zip(self.modalities, X_list)]
+        if self.integration_method == "control_anchor_rank_blend" and self.task != CLASSIFICATION:
+            raise ValueError("control_anchor_rank_blend is only available for classification.")
+
         self.splits = [
             (train_index, test_index)
             for train_index, test_index in self.cv.split(X_list[0], y)
         ]
+
+        if self.integration_method == "control_anchor_rank_blend":
+            self.classes_ = self._validate_control_anchor_labels(y)
+            self.integration_weights_ = self._resolve_integration_weights()
+            y_oof = np.hstack(
+                [np.asarray(y)[test_index] for train_index, test_index in self.splits]
+            )
+            oof_scores = [
+                self._fit_modality_oof_scores(X, y, modality)
+                for modality, X in zip(self.modalities, X_list)
+            ]
+            control_mask = y_oof == self.control_label
+            if not np.any(control_mask):
+                raise ValueError("control-anchor reference distribution has no controls.")
+            self.control_anchor_scores_ = [
+                scores[control_mask] for scores in oof_scores
+            ]
+            self.modalities = [clone(m).fit(X, y) for m, X in zip(self.modalities, X_list)]
+            return self
+
+        self.modalities = [clone(m).fit(X, y) for m, X in zip(self.modalities, X_list)]
         y_stacking = np.hstack(
             [np.array(y)[test_index] for train_index, test_index in self.splits]
         )
@@ -396,6 +538,10 @@ class MESA:
 
     def predict(self, X_list_test):
         """Predict labels or continuous values from modality test matrices."""
+        if self.integration_method == "control_anchor_rank_blend":
+            scores = self._control_anchor_rank_scores(X_list_test)
+            return np.where(scores >= 0.5, self.classes_[1], self.classes_[0])
+
         base_prediction_test = np.hstack(
             [
                 stacking_output(m.predictor_, m.transform(X), self.task)
@@ -414,6 +560,10 @@ class MESA:
         """
         if self.task == REGRESSION:
             raise ValueError("predict_proba is only available when task='classification'.")
+        if self.integration_method == "control_anchor_rank_blend":
+            scores = self._control_anchor_rank_scores(X_list_test)
+            return np.column_stack([1.0 - scores, scores])
+
         base_prediction_test = np.hstack(
             [
                 stacking_output(m.predictor_, m.transform(X), self.task)

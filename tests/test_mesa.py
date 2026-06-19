@@ -114,6 +114,180 @@ def test_mesa_ensemble_classification_and_regression():
         mesa_reg.predict_proba([Xr1.iloc[:10], Xr2.iloc[:10]])
 
 
+def test_mesa_control_anchor_rank_blend_classification():
+    X1, y = make_classification(
+        n_samples=72,
+        n_features=12,
+        n_informative=6,
+        random_state=10,
+    )
+    X2, _ = make_classification(
+        n_samples=72,
+        n_features=10,
+        n_informative=5,
+        random_state=11,
+    )
+    X1 = pd.DataFrame(X1)
+    X2 = pd.DataFrame(X2)
+
+    modalities = [
+        MESA_modality(
+            task="classification",
+            top_n=4,
+            selector=8,
+            classifier=RandomForestClassifier(n_estimators=20, random_state=0),
+            boruta_estimator=RandomForestClassifier(n_estimators=20, random_state=0),
+            random_state=0,
+        ),
+        MESA_modality(
+            task="classification",
+            top_n=3,
+            selector=6,
+            classifier=LogisticRegression(max_iter=1000),
+            boruta_estimator=RandomForestClassifier(n_estimators=20, random_state=0),
+            random_state=0,
+        ),
+    ]
+    model = MESA(
+        task="classification",
+        modalities=modalities,
+        integration_method="control_anchor_rank_blend",
+        integration_weights=[0.6, 0.4],
+        random_state=0,
+    )
+
+    model.fit([X1, X2], y)
+    proba = model.predict_proba([X1.iloc[:9], X2.iloc[:9]])
+    pred = model.predict([X1.iloc[:9], X2.iloc[:9]])
+
+    assert proba.shape == (9, 2)
+    assert pred.shape == (9,)
+    assert np.allclose(proba.sum(axis=1), 1.0)
+    assert np.all((proba[:, 1] >= 0.0) & (proba[:, 1] <= 1.0))
+    assert len(model.control_anchor_scores_) == 2
+    assert model.integration_weights_.tolist() == [0.6, 0.4]
+    expected_controls = sum(
+        int(np.sum(np.asarray(y)[test_index] == 0))
+        for _, test_index in model.splits
+    )
+    assert all(anchor.shape == (expected_controls,) for anchor in model.control_anchor_scores_)
+
+
+def test_mesa_control_anchor_rank_blend_respects_control_label():
+    X1, y_numeric = make_classification(
+        n_samples=60,
+        n_features=10,
+        n_informative=5,
+        random_state=12,
+    )
+    X2, _ = make_classification(
+        n_samples=60,
+        n_features=8,
+        n_informative=4,
+        random_state=13,
+    )
+    y = np.where(y_numeric == 0, "control", "case")
+    modalities = [
+        MESA_modality(
+            task="classification",
+            top_n=3,
+            selector=6,
+            classifier=RandomForestClassifier(n_estimators=20, random_state=0),
+            boruta_estimator=RandomForestClassifier(n_estimators=20, random_state=0),
+        ),
+        MESA_modality(
+            task="classification",
+            top_n=3,
+            selector=6,
+            classifier=RandomForestClassifier(n_estimators=20, random_state=1),
+            boruta_estimator=RandomForestClassifier(n_estimators=20, random_state=1),
+        ),
+    ]
+    model = MESA(
+        task="classification",
+        modalities=modalities,
+        integration_method="control_anchor_rank_blend",
+        control_label="control",
+        random_state=0,
+    )
+
+    model.fit([pd.DataFrame(X1), pd.DataFrame(X2)], y)
+    proba = model.predict_proba([pd.DataFrame(X1).iloc[:6], pd.DataFrame(X2).iloc[:6]])
+
+    assert model.classes_.tolist() == ["control", "case"]
+    assert proba.shape == (6, 2)
+    assert np.allclose(proba.sum(axis=1), 1.0)
+
+
+def test_control_anchor_rank_blend_uses_non_control_probability_column():
+    class EstimatorWithStringClasses:
+        classes_ = np.asarray(["case", "control"])
+
+        def predict_proba(self, X):
+            return np.tile(np.asarray([[0.8, 0.2]]), (len(X), 1))
+
+    model = MESA(
+        modalities=[MESA_modality()],
+        integration_method="control_anchor_rank_blend",
+        control_label="control",
+    )
+    model.classes_ = np.asarray(["control", "case"])
+
+    scores = model._positive_class_scores(
+        EstimatorWithStringClasses(),
+        pd.DataFrame(np.zeros((3, 2))),
+    )
+
+    assert np.allclose(scores, [0.8, 0.8, 0.8])
+
+
+def test_mesa_control_anchor_rank_blend_rejects_regression():
+    Xr1, y = make_regression(
+        n_samples=50,
+        n_features=10,
+        n_informative=5,
+        random_state=2,
+    )
+    Xr2, _ = make_regression(
+        n_samples=50,
+        n_features=8,
+        n_informative=4,
+        random_state=3,
+    )
+    modalities = [
+        MESA_modality(
+            task="regression",
+            top_n=3,
+            selector=6,
+            predictor=LinearRegression(),
+            boruta_estimator=RandomForestRegressor(n_estimators=20, random_state=0),
+        ),
+        MESA_modality(
+            task="regression",
+            top_n=3,
+            selector=6,
+            predictor=LinearRegression(),
+            boruta_estimator=RandomForestRegressor(n_estimators=20, random_state=0),
+        ),
+    ]
+    model = MESA(
+        task="regression",
+        modalities=modalities,
+        integration_method="control_anchor_rank_blend",
+    )
+
+    with pytest.raises(ValueError, match="control_anchor_rank_blend"):
+        model.fit([pd.DataFrame(Xr1), pd.DataFrame(Xr2)], y)
+
+
+def test_mesa_rejects_unknown_integration_method():
+    with pytest.raises(ValueError, match="integration_method"):
+        MESA(
+            modalities=[MESA_modality()],
+            integration_method="not_a_method",
+        ).fit([pd.DataFrame(np.random.randn(20, 4))], np.array([0, 1] * 10))
+
+
 def test_mesa_cv_classification_and_regression_metrics():
     Xc, yc = make_classification(n_samples=60, n_features=10, n_informative=5, random_state=0)
     Xc = pd.DataFrame(Xc)
