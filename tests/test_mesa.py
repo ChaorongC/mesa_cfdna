@@ -3,9 +3,50 @@ import pandas as pd
 import pytest
 from sklearn.datasets import make_classification, make_regression
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.base import clone
 from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.model_selection import StratifiedKFold
 
 from mesa import MESA, MESA_CV, MESA_modality
+
+
+class ProbabilityColumnModality:
+    """Minimal cloneable modality whose first input column is P(positive)."""
+
+    def __init__(self, positive_label=1, invalid=None, task="classification"):
+        self.positive_label = positive_label
+        self.invalid = invalid
+        self.task = task
+
+    def get_params(self, deep=True):
+        return {
+            "positive_label": self.positive_label,
+            "invalid": self.invalid,
+            "task": self.task,
+        }
+
+    def fit(self, X, y):
+        self.classes_ = np.unique(np.asarray(y))
+        self.predictor_ = self
+        return self
+
+    def transform_predict_proba(self, X):
+        score = np.asarray(X, dtype=float)[:, 0].copy()
+        if self.invalid == "nan":
+            score[0] = np.nan
+        elif self.invalid == "high":
+            score[0] = 1.1
+        positive = np.flatnonzero(self.classes_ == self.positive_label)
+        if positive.size != 1:
+            raise ValueError("positive_label should identify exactly one class")
+        proba = np.column_stack([1.0 - score, 1.0 - score])
+        proba[:, positive[0]] = score
+        if self.invalid == "sum":
+            proba[0] = [0.4, 0.4]
+        return proba
+
+    def get_support(self, step=None):
+        return np.asarray([0])
 
 
 def test_mesa_modality_classification_and_regression_defaults():
@@ -171,6 +212,155 @@ def test_mesa_control_anchor_rank_blend_classification():
         for _, test_index in model.splits
     )
     assert all(anchor.shape == (expected_controls,) for anchor in model.control_anchor_scores_)
+
+
+def test_mesa_probability_blend_equal_and_weighted_probabilities():
+    X1 = pd.DataFrame({"probability": [0.1, 0.8, 0.6, 0.4]})
+    X2 = pd.DataFrame({"probability": [0.3, 0.4, 0.2, 0.9]})
+    y = np.asarray([0, 1, 1, 0])
+    modalities = [ProbabilityColumnModality(), ProbabilityColumnModality()]
+
+    equal = MESA(modalities=modalities, integration_method="probability_blend")
+    equal.fit([X1, X2], y)
+    equal_proba = equal.predict_proba([X1, X2])
+
+    expected_equal = np.asarray([0.2, 0.6, 0.4, 0.65])
+    np.testing.assert_allclose(equal_proba[:, 1], expected_equal)
+    np.testing.assert_allclose(equal_proba.sum(axis=1), 1.0)
+    assert equal.predict([X1, X2]).tolist() == [0, 1, 0, 1]
+    assert equal.integration_weights_.tolist() == [0.5, 0.5]
+    assert not hasattr(equal, "splits")
+    assert not hasattr(equal, "meta_estimator_")
+
+    weighted = MESA(
+        modalities=modalities,
+        integration_method="probability_blend",
+        integration_weights=[0.75, 0.25],
+    )
+    weighted.fit([X1, X2], y)
+    expected_weighted = 0.75 * X1.iloc[:, 0] + 0.25 * X2.iloc[:, 0]
+    np.testing.assert_allclose(
+        weighted.predict_proba([X1, X2])[:, 1],
+        expected_weighted,
+    )
+
+
+def test_mesa_probability_blend_respects_control_label_and_class_order():
+    X1 = pd.DataFrame({"probability": [0.2, 0.8, 0.7, 0.3]})
+    X2 = pd.DataFrame({"probability": [0.4, 0.6, 0.9, 0.1]})
+    y = np.asarray(["control", "case", "case", "control"])
+    modalities = [
+        ProbabilityColumnModality(positive_label="case"),
+        ProbabilityColumnModality(positive_label="case"),
+    ]
+    model = MESA(
+        modalities=modalities,
+        integration_method="probability_blend",
+        control_label="control",
+    )
+
+    model.fit([X1, X2], y)
+    np.testing.assert_allclose(
+        model.predict_proba([X1, X2])[:, 1],
+        [0.3, 0.7, 0.8, 0.2],
+    )
+    assert model.classes_.tolist() == ["control", "case"]
+    assert model.predict([X1, X2]).tolist() == ["control", "case", "case", "control"]
+
+
+@pytest.mark.parametrize(
+    "weights, message",
+    [
+        ([1.0], "match the number"),
+        ([1.1, -0.1], "non-negative"),
+        ([np.nan, np.nan], "finite"),
+        ([0.4, 0.4], "sum to 1"),
+    ],
+)
+def test_mesa_probability_blend_rejects_invalid_weights(weights, message):
+    X = pd.DataFrame({"probability": [0.2, 0.8, 0.3, 0.7]})
+    model = MESA(
+        modalities=[ProbabilityColumnModality(), ProbabilityColumnModality()],
+        integration_method="probability_blend",
+        integration_weights=weights,
+    )
+    with pytest.raises(ValueError, match=message):
+        model.fit([X, X], np.asarray([0, 1, 0, 1]))
+
+
+def test_mesa_probability_blend_rejects_incomplete_or_invalid_inputs():
+    X = pd.DataFrame({"probability": [0.2, 0.8, 0.3, 0.7]})
+    y = np.asarray([0, 1, 0, 1])
+    modalities = [ProbabilityColumnModality(), ProbabilityColumnModality()]
+
+    with pytest.raises(ValueError, match="one matrix per modality"):
+        MESA(modalities=modalities, integration_method="probability_blend").fit([X], y)
+    with pytest.raises(ValueError, match="align with y"):
+        MESA(modalities=modalities, integration_method="probability_blend").fit(
+            [X, X.iloc[:-1]], y
+        )
+
+    model = MESA(modalities=modalities, integration_method="probability_blend").fit(
+        [X, X], y
+    )
+    with pytest.raises(ValueError, match="one matrix per modality"):
+        model.predict_proba([X])
+    with pytest.raises(ValueError, match="same samples"):
+        model.predict_proba([X, X.iloc[:-1]])
+
+    for invalid, message in [
+        ("nan", "finite"),
+        ("high", "between 0 and 1"),
+        ("sum", "sum to 1"),
+    ]:
+        invalid_model = MESA(
+            modalities=[ProbabilityColumnModality(invalid=invalid)],
+            integration_method="probability_blend",
+        ).fit([X], y)
+        with pytest.raises(ValueError, match=message):
+            invalid_model.predict_proba([X])
+
+
+def test_mesa_probability_blend_rejects_multiclass_and_regression():
+    X = pd.DataFrame({"probability": [0.2, 0.8, 0.3, 0.7, 0.4, 0.6]})
+    multiclass = MESA(
+        modalities=[ProbabilityColumnModality(positive_label=2)],
+        integration_method="probability_blend",
+    )
+    with pytest.raises(ValueError, match="exactly two classes"):
+        multiclass.fit([X], np.asarray([0, 1, 2, 0, 1, 2]))
+
+    regression = MESA(
+        task="regression",
+        modalities=[MESA_modality(task="regression")],
+        integration_method="probability_blend",
+    )
+    with pytest.raises(ValueError, match="probability_blend"):
+        regression.fit([X], np.linspace(0.0, 1.0, len(X)))
+
+
+def test_mesa_probability_blend_is_cloneable_and_runs_in_mesa_cv():
+    X1 = pd.DataFrame({"probability": [0.1, 0.8, 0.2, 0.7, 0.3, 0.9]})
+    X2 = pd.DataFrame({"probability": [0.2, 0.7, 0.3, 0.6, 0.4, 0.8]})
+    y = np.asarray([0, 1, 0, 1, 0, 1])
+    model = MESA(
+        modalities=[ProbabilityColumnModality(), ProbabilityColumnModality()],
+        integration_method="probability_blend",
+        integration_weights=[0.6, 0.4],
+        custom_flag="preserved",
+    )
+
+    cloned = clone(model)
+    assert cloned.integration_method == "probability_blend"
+    assert cloned.integration_weights == [0.6, 0.4]
+    assert cloned.custom_flag == "preserved"
+
+    evaluator = MESA_CV(
+        modality=model,
+        task="classification",
+        cv=StratifiedKFold(n_splits=3, shuffle=True, random_state=0),
+    ).fit([X1, X2], y)
+    assert np.isfinite(evaluator.get_performance())
 
 
 def test_mesa_control_anchor_rank_blend_respects_control_label():

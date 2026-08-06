@@ -1,6 +1,6 @@
 # Multimodal Epigenetic Sequencing Analysis (MESA)
 
-MESA is a Python package for sample-level multimodal cfDNA biomarker modeling. It provides a scikit-learn-style API for preprocessing, feature selection, optional redundancy pruning, modality-specific model fitting, stacked multimodal prediction, and cross-validation.
+MESA is a Python package for sample-level multimodal cfDNA biomarker modeling. It provides a scikit-learn-style API for preprocessing, feature selection, optional redundancy pruning, modality-specific model fitting, multimodal integration, and cross-validation.
 
 The package supports both classification and regression.
 
@@ -26,13 +26,13 @@ python scripts/run_smoke_checks.py
 - Applies variance filtering and univariate feature selection
 - Optionally prunes redundant correlated features after the first selector
 - Uses Boruta for secondary feature selection
-- Trains single-modality predictors and stacked multimodal models
+- Trains single-modality predictors and integrates them by stacking, direct probability blending, or control-anchored rank blending
 - Evaluates models with built-in cross-validation helpers
 
 ## Core API
 
 - `MESA_modality`: single-modality pipeline
-- `MESA`: multimodal stacking ensemble
+- `MESA`: multimodal integration ensemble
 - `MESA_CV`: cross-validation wrapper
 
 Default task-aware estimators:
@@ -45,8 +45,9 @@ Default task-aware estimators:
 
 - [Overview figure](figures/mesa_pipeline_overview.svg): compact pipeline summary for README or slides
 - [Detailed method figure](figures/mesa_pipeline_detailed.svg): expanded schematic with task-aware branches
+- [Illustration figure](figures/mesa_pipeline_illustration.svg): presentation-oriented workflow summary
 
-Regenerate both figures with:
+Regenerate all figures with:
 
 ```bash
 source /data/homezvol0/chaoronc/miniconda3/etc/profile.d/conda.sh
@@ -85,6 +86,17 @@ mesa = MESA([modality_1, modality_2], random_state=42)
 mesa.fit([X1_train, X2_train], y_train)
 ensemble_proba = mesa.predict_proba([X1_test, X2_test])
 
+probability_blend = MESA(
+    [modality_1, modality_2],
+    integration_method="probability_blend",
+    # Omit integration_weights for an equal arithmetic mean.
+    integration_weights=[0.60, 0.40],
+    control_label=0,
+    random_state=42,
+)
+probability_blend.fit([X1_train, X2_train], y_train)
+blended_proba = probability_blend.predict_proba([X1_test, X2_test])
+
 rank_blend = MESA(
     [modality_1, modality_2],
     integration_method="control_anchor_rank_blend",
@@ -99,6 +111,33 @@ cv_eval = MESA_CV(MESA_modality(top_n=50, random_state=42))
 cv_eval.fit(X1_train, y_train)
 auc = cv_eval.get_performance()
 ```
+
+#### Direct probability-blend integration
+
+`integration_method="probability_blend"` is a binary-classification method
+that directly averages the positive-class probabilities returned by the fitted
+modality models. It does not learn a meta-estimator, optimize weights, generate
+internal out-of-fold integration features, calibrate probabilities, or tune a
+classification threshold.
+
+If `integration_weights` is omitted, MESA uses equal weights. Explicit weights
+must be finite, non-negative, match the number of modalities, and sum to one;
+zero weights are allowed:
+
+```text
+probability = 0.60 * methylation_probability + 0.40 * fragment_probability
+```
+
+The returned probability is only as calibrated as the component probabilities
+being averaged. To average calibrated probabilities, supply modality predictors
+whose `predict_proba()` outputs are already calibrated using training-only data.
+MESA requires every modality for every prediction sample and rejects nonfinite
+or out-of-range component probabilities. `predict()` applies a fixed threshold
+of 0.5; alternative operating thresholds should be applied by the caller.
+
+For leakage-free evaluation, call `fit()` only on the training partition of the
+current train/test split or use `MESA_CV`. Do not use test or external labels to
+choose weights, calibration, or thresholds.
 
 #### Control-anchored rank-blend integration
 
@@ -224,10 +263,10 @@ This step is useful when neighboring or highly correlated features carry redunda
 - `task`: shared learning task for every modality and the meta-estimator.
 - `meta_estimator`: second-level estimator fitted on modality outputs. If omitted, MESA uses logistic regression for classification and linear regression for regression.
 - `random_state`: random seed used by the default stacking cross-validation splitter.
-- `cv`: cross-validation splitter used to generate out-of-fold modality predictions for stacking.
-- `integration_method`: multimodal integration strategy. `"stacking"` preserves the original learned meta-estimator behavior. `"control_anchor_rank_blend"` uses a classification-only fixed-weight blend of modality scores converted to empirical percentile ranks against out-of-fold training-control anchors.
-- `integration_weights`: per-modality weights for `"control_anchor_rank_blend"`. If omitted, equal weights are used. Weights must match the number of modalities, be non-negative, finite, and sum to 1.
-- `control_label`: class label used as the control group for `"control_anchor_rank_blend"` anchor distributions. Default is `0`.
+- `cv`: cross-validation splitter used to generate out-of-fold modality predictions for stacking and control-anchor rank blending; ignored by direct probability blending.
+- `integration_method`: multimodal integration strategy. `"stacking"` preserves the original learned meta-estimator behavior. `"probability_blend"` directly averages binary modality probabilities with fixed weights. `"control_anchor_rank_blend"` uses a classification-only fixed-weight blend of modality scores converted to empirical percentile ranks against out-of-fold training-control anchors.
+- `integration_weights`: per-modality weights for `"probability_blend"` or `"control_anchor_rank_blend"`. If omitted, equal weights are used. Weights must match the number of modalities, be non-negative, finite, and sum to 1.
+- `control_label`: negative class label. It identifies the complementary positive-probability column for `"probability_blend"` and defines the control anchor distribution for `"control_anchor_rank_blend"`. Default is `0`.
 
 ### `MESA_CV` parameters
 
@@ -251,6 +290,17 @@ Classification defaults to ROC AUC. Regression defaults to R². Supported regres
 - Use pandas `DataFrame` inputs when possible so selected feature indices can be mapped back to columns cleanly.
 - For biological interpretation, validate any pruning or selector change on a subset before large runs; these changes can alter feature rankings and downstream performance.
 - Human contributor guidance lives in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Roadmap
+
+- Keep probability calibration outside `MESA_modality` so its feature-selection
+  and prediction contract remains simple and backward compatible.
+- If calibration support is added later, prefer a separate optional utility
+  that fits a frozen probability mapping from caller-supplied, training-only
+  out-of-fold predictions. It should not hide internal cross-validation,
+  threshold tuning, or cohort-specific recalibration.
+- Keep `probability_blend` calibration-agnostic: it will combine the component
+  probabilities supplied by fitted modalities without modifying their scale.
 
 ## Citation
 

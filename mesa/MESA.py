@@ -322,20 +322,26 @@ class MESA:
     random_state : int, default=0
         Random seed used by the default CV splitter.
     cv : cross-validator or None, default=None
-        Splitter used to generate modality-level stacking features. If
-        ``None``, a repeated task-aware splitter is used.
-    integration_method : {"stacking", "control_anchor_rank_blend"}, default="stacking"
+        Splitter used to generate modality-level out-of-fold outputs for
+        stacking and control-anchored rank blending. It is ignored by direct
+        probability blending. If ``None``, a repeated task-aware splitter is
+        used.
+    integration_method : {"stacking", "probability_blend", "control_anchor_rank_blend"}, default="stacking"
         Multimodal integration strategy. ``"stacking"`` preserves the original
-        MESA behavior. ``"control_anchor_rank_blend"`` is a classification-only
-        fixed-weight blend of modality scores transformed to empirical
-        percentile ranks against out-of-fold training-control anchors.
+        MESA behavior. ``"probability_blend"`` is a classification-only fixed
+        weighted mean of the probabilities returned by the fitted modalities.
+        ``"control_anchor_rank_blend"`` is a classification-only fixed-weight
+        blend of modality scores transformed to empirical percentile ranks
+        against out-of-fold training-control anchors.
     integration_weights : sequence of float or None, default=None
-        Per-modality weights used by ``"control_anchor_rank_blend"``. If
-        ``None``, equal weights are used. Provided weights must be finite,
-        non-negative, match the number of modalities, and sum to 1.
+        Per-modality weights used by ``"probability_blend"`` and
+        ``"control_anchor_rank_blend"``. If ``None``, equal weights are used.
+        Provided weights must be finite, non-negative, match the number of
+        modalities, and sum to 1.
     control_label : object, default=0
-        Class label used to define controls for control-anchor reference
-        distributions in ``"control_anchor_rank_blend"``.
+        Negative class label for ``"probability_blend"`` and class label used
+        to define control-anchor reference distributions in
+        ``"control_anchor_rank_blend"``.
     **kwargs
         Additional attributes attached to the instance.
     """
@@ -362,6 +368,7 @@ class MESA:
         self.integration_method = integration_method
         self.integration_weights = integration_weights
         self.control_label = control_label
+        self._extra_params = dict(kwargs)
         for key, value in kwargs.items():
             setattr(self, key, value)
 
@@ -397,7 +404,7 @@ class MESA:
 
     def _validate_integration_method(self):
         """Validate the requested multimodal integration method."""
-        valid = {"stacking", "control_anchor_rank_blend"}
+        valid = {"stacking", "probability_blend", "control_anchor_rank_blend"}
         if self.integration_method not in valid:
             raise ValueError(
                 "integration_method should be one of: "
@@ -408,6 +415,8 @@ class MESA:
     def _resolve_integration_weights(self):
         """Validate and return fixed integration weights."""
         n_modalities = len(self.modalities)
+        if n_modalities == 0:
+            raise ValueError("At least one modality is required for fixed-weight integration.")
         if self.integration_weights is None:
             return np.repeat(1.0 / n_modalities, n_modalities)
 
@@ -422,15 +431,54 @@ class MESA:
             raise ValueError("integration_weights should sum to 1.")
         return weights
 
-    def _validate_control_anchor_labels(self, y):
+    def _validate_binary_labels(self, y, method):
         """Validate binary labels and return labels aligned to output columns."""
         classes = np.unique(np.asarray(y))
         if classes.size != 2:
-            raise ValueError("control_anchor_rank_blend requires exactly two classes.")
+            raise ValueError(f"{method} requires exactly two classes.")
         if self.control_label not in classes:
             raise ValueError("control_label should be present in y.")
         positive_label = classes[classes != self.control_label][0]
         return np.asarray([self.control_label, positive_label])
+
+    def _validate_control_anchor_labels(self, y):
+        """Validate labels used by control-anchored rank blending."""
+        return self._validate_binary_labels(y, "control_anchor_rank_blend")
+
+    def _validate_probability_blend_inputs(self, X_list, expected_samples=None):
+        """Require one complete, sample-aligned matrix per modality."""
+        try:
+            n_inputs = len(X_list)
+        except TypeError as exc:
+            raise ValueError("X_list should contain one matrix per modality.") from exc
+        if len(self.modalities) == 0:
+            raise ValueError("probability_blend requires at least one modality.")
+        if n_inputs != len(self.modalities):
+            raise ValueError("probability_blend requires one matrix per modality.")
+
+        try:
+            sample_counts = [len(X) for X in X_list]
+        except TypeError as exc:
+            raise ValueError("Each probability_blend input should be a sample matrix.") from exc
+        if expected_samples is not None:
+            if any(count != expected_samples for count in sample_counts):
+                raise ValueError("All probability_blend inputs should align with y.")
+        elif len(set(sample_counts)) != 1:
+            raise ValueError("All probability_blend inputs should contain the same samples.")
+
+    def _probability_blend_scores(self, X_list_test):
+        """Return the fixed weighted mean of modality positive probabilities."""
+        self._validate_probability_blend_inputs(X_list_test)
+        modality_scores = np.vstack(
+            [
+                self._positive_class_scores(modality, X)
+                for modality, X in zip(self.modalities, X_list_test)
+            ]
+        )
+        scores = np.sum(self.integration_weights_[:, None] * modality_scores, axis=0)
+        if not np.all(np.isfinite(scores)) or np.any((scores < 0) | (scores > 1)):
+            raise ValueError("probability_blend produced invalid probabilities.")
+        return scores
 
     @staticmethod
     def _empirical_percentile(scores, reference):
@@ -465,10 +513,19 @@ class MESA:
         """Return probabilities for the class opposite ``control_label``."""
         if hasattr(modality, "transform_predict_proba"):
             proba = modality.transform_predict_proba(X)
-            predictor = getattr(modality, "predictor_", None)
+            predictor = getattr(modality, "predictor_", modality)
         else:
             proba = modality.predict_proba(X)
             predictor = modality
+        proba = np.asarray(proba, dtype=float)
+        if proba.ndim != 2 or proba.shape[1] != 2:
+            raise ValueError("Modality predict_proba should return two probability columns.")
+        if not np.all(np.isfinite(proba)):
+            raise ValueError("Modality probabilities should contain only finite values.")
+        if np.any((proba < 0) | (proba > 1)):
+            raise ValueError("Modality probabilities should be between 0 and 1.")
+        if not np.allclose(proba.sum(axis=1), 1.0, rtol=0, atol=1e-8):
+            raise ValueError("Modality probability rows should sum to 1.")
         predictor_classes = getattr(predictor, "classes_", None)
         if predictor_classes is None:
             return proba[:, 1]
@@ -479,7 +536,7 @@ class MESA:
         return proba[:, matches[0]]
 
     def fit(self, X_list, y):
-        """Fit all modalities and the second-level meta-estimator.
+        """Fit all modalities and the requested integration state.
 
         Parameters
         ----------
@@ -499,8 +556,21 @@ class MESA:
             if getattr(modality, "task", self.task) != self.task:
                 raise ValueError("All modalities should use the same task as MESA.")
 
-        if self.integration_method == "control_anchor_rank_blend" and self.task != CLASSIFICATION:
-            raise ValueError("control_anchor_rank_blend is only available for classification.")
+        fixed_probability_methods = {"probability_blend", "control_anchor_rank_blend"}
+        if self.integration_method in fixed_probability_methods and self.task != CLASSIFICATION:
+            raise ValueError(
+                f"{self.integration_method} is only available for classification."
+            )
+
+        if self.integration_method == "probability_blend":
+            self.classes_ = self._validate_binary_labels(y, "probability_blend")
+            self.integration_weights_ = self._resolve_integration_weights()
+            self._validate_probability_blend_inputs(X_list, expected_samples=len(y))
+            self.modalities = [
+                clone(modality).fit(X, y)
+                for modality, X in zip(self.modalities, X_list)
+            ]
+            return self
 
         self.splits = [
             (train_index, test_index)
@@ -538,6 +608,9 @@ class MESA:
 
     def predict(self, X_list_test):
         """Predict labels or continuous values from modality test matrices."""
+        if self.integration_method == "probability_blend":
+            scores = self._probability_blend_scores(X_list_test)
+            return np.where(scores >= 0.5, self.classes_[1], self.classes_[0])
         if self.integration_method == "control_anchor_rank_blend":
             scores = self._control_anchor_rank_scores(X_list_test)
             return np.where(scores >= 0.5, self.classes_[1], self.classes_[0])
@@ -560,6 +633,9 @@ class MESA:
         """
         if self.task == REGRESSION:
             raise ValueError("predict_proba is only available when task='classification'.")
+        if self.integration_method == "probability_blend":
+            scores = self._probability_blend_scores(X_list_test)
+            return np.column_stack([1.0 - scores, scores])
         if self.integration_method == "control_anchor_rank_blend":
             scores = self._control_anchor_rank_scores(X_list_test)
             return np.column_stack([1.0 - scores, scores])
@@ -571,6 +647,21 @@ class MESA:
             ]
         )
         return self.meta_estimator_.predict_proba(base_prediction_test)
+
+    def get_params(self, deep=True):
+        """Return sklearn-style constructor parameters for cloning."""
+        params = {
+            "modalities": self.modalities,
+            "task": self.task,
+            "meta_estimator": self.meta_estimator,
+            "random_state": self.random_state,
+            "cv": self.cv,
+            "integration_method": self.integration_method,
+            "integration_weights": self.integration_weights,
+            "control_label": self.control_label,
+        }
+        params.update(self._extra_params)
+        return params
 
     def get_support(self, step=None):
         """Return feature support information from each fitted modality."""

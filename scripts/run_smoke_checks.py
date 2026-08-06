@@ -9,6 +9,7 @@ from sklearn.datasets import make_classification, make_regression
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.metrics import r2_score, roc_auc_score
+from sklearn.model_selection import StratifiedKFold
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -70,6 +71,40 @@ def run_classification_checks():
     mesa.fit([X1, X2], y)
     mesa_proba = mesa.predict_proba([X1.iloc[:12], X2.iloc[:12]])
 
+    probability_blend = MESA(
+        task="classification",
+        modalities=[
+            MESA_modality(
+                task="classification",
+                top_n=5,
+                selector=10,
+                predictor=RandomForestClassifier(n_estimators=20, random_state=0),
+                boruta_estimator=RandomForestClassifier(n_estimators=20, random_state=0),
+                random_state=0,
+            ),
+            MESA_modality(
+                task="classification",
+                top_n=4,
+                selector=8,
+                predictor=LogisticRegression(max_iter=1000),
+                boruta_estimator=RandomForestClassifier(n_estimators=20, random_state=0),
+                random_state=0,
+            ),
+        ],
+        integration_method="probability_blend",
+    )
+    probability_blend.fit([X1, X2], y)
+    probability_blend_proba = probability_blend.predict_proba(
+        [X1.iloc[:12], X2.iloc[:12]]
+    )
+
+    probability_blend_cv = MESA_CV(
+        modality=probability_blend,
+        task="classification",
+        cv=StratifiedKFold(n_splits=3, shuffle=True, random_state=0),
+    )
+    probability_blend_cv.fit([X1, X2], y)
+
     cv_eval = MESA_CV(
         modality=MESA_modality(
             task="classification",
@@ -87,6 +122,8 @@ def run_classification_checks():
         "single_modality_auc": auc,
         "single_modality_proba_shape": tuple(proba.shape),
         "ensemble_proba_shape": tuple(mesa_proba.shape),
+        "probability_blend_proba_shape": tuple(probability_blend_proba.shape),
+        "probability_blend_cv_auc": probability_blend_cv.get_performance(),
         "cv_auc": cv_eval.get_performance(),
     }
 

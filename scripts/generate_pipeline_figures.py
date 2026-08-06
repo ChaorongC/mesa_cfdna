@@ -16,6 +16,7 @@ plt.rcParams.update(
         "figure.facecolor": "white",
         "savefig.facecolor": "white",
         "svg.fonttype": "none",
+        "svg.hashsalt": "mesa-cfdna",
     }
 )
 
@@ -114,7 +115,7 @@ def draw_overview():
         fig,
         letter="A",
         title="MESA workflow overview",
-        subtitle="Each modality is processed independently, then combined by stacked learning.",
+        subtitle="Each modality is processed independently, then combined by a selected integration strategy.",
     )
 
     x_input, w_input, h_input = 0.05, 0.14, 0.18
@@ -171,15 +172,15 @@ def draw_overview():
         ax,
         0.89,
         0.34,
-        0.08,
+        0.10,
         0.24,
-        "MESA\nstacking",
+        "MESA\nintegration",
         COLORS["eval"],
-        fs=12,
+        fs=10.3,
         weight="bold",
     )
-    add_box(ax, 0.90, 0.18, 0.09, 0.08, "classification\nprobabilities", COLORS["panel"], fs=9.4)
-    add_box(ax, 0.90, 0.07, 0.09, 0.08, "regression\npredictions", COLORS["panel"], fs=9.4)
+    add_box(ax, 0.89, 0.18, 0.10, 0.08, "classification\nprobabilities", COLORS["panel"], fs=9.2)
+    add_box(ax, 0.89, 0.07, 0.10, 0.08, "regression\npredictions", COLORS["panel"], fs=9.2)
 
     add_badge(ax, 0.258, 0.655, "1", COLORS["accent"])
     add_badge(ax, 0.538, 0.615, "2", COLORS["accent"])
@@ -231,7 +232,7 @@ def draw_detailed():
     add_box(ax, 0.63, low_y, 0.17, 0.14, "Per-modality predictor\nclassification:\nRandomForestClassifier\nregression:\nRandomForestRegressor", COLORS["model"], fs=9.3)
     add_box(ax, 0.84, low_y, 0.12, 0.14, "Output\nselected features\n+ fitted model", COLORS["panel"], fs=10.2)
 
-    add_box(ax, 0.54, bottom_y, 0.25, 0.09, "MESA multimodal stacking\ncombine modality-level outputs\nwith a task-aware meta-estimator", COLORS["eval"], fs=10.2, weight="bold")
+    add_box(ax, 0.54, bottom_y, 0.25, 0.09, "MESA multimodal integration\nstacking: classification / regression\nprobability / rank blends: binary", COLORS["eval"], fs=9.2, weight="bold")
     add_box(ax, 0.80, bottom_y, 0.17, 0.09, "MESA_CV\nclassification: ROC AUC\nregression: R² or other metrics", COLORS["eval"], fs=9.2)
 
     add_badge(ax, 0.285, top_y + 0.11, "1", COLORS["accent"])
@@ -256,7 +257,7 @@ def draw_detailed():
     ax.text(0.065, 0.64, "Clean and rank", fontsize=10, color=COLORS["muted"])
     ax.text(0.47, 0.40, "Prune redundancy", fontsize=10, color=COLORS["muted"])
     ax.text(0.745, 0.40, "Select + fit", fontsize=10, color=COLORS["muted"])
-    ax.text(0.60, 0.005, "Figure B. Expanded schematic of preprocessing, redundancy pruning, Boruta selection, prediction, multimodal stacking, and cross-validation.", fontsize=9.5, color=COLORS["muted"], ha="center", va="bottom")
+    ax.text(0.60, 0.005, "Figure B. Expanded schematic of preprocessing, redundancy pruning, Boruta selection, prediction, multimodal integration, and cross-validation.", fontsize=9.5, color=COLORS["muted"], ha="center", va="bottom")
     return fig
 
 
@@ -327,7 +328,7 @@ def draw_illustration():
     chip_specs = [
         (0.35, "selected\nCpGs", "#EBD6BF"),
         (0.47, "modality\nmodels", "#E6DDF7"),
-        (0.59, "stacked\nsignal", "#DCECF6"),
+        (0.59, "integrated\nsignal", "#DCECF6"),
     ]
     for x, label, fc in chip_specs:
         add_box(ax, x, chip_y, 0.10, 0.08, label, fc, fs=10.5, weight="bold")
@@ -379,9 +380,22 @@ def draw_illustration():
 
 
 def save(fig, stem):
-    fig.savefig(OUTDIR / f"{stem}.svg", bbox_inches="tight")
-    fig.savefig(OUTDIR / f"{stem}.png", dpi=300, bbox_inches="tight")
+    svg_path = OUTDIR / f"{stem}.svg"
+    fig.savefig(
+        svg_path,
+        bbox_inches="tight",
+        metadata={"Creator": "mesa-cfdna", "Date": None},
+    )
+    fig.savefig(
+        OUTDIR / f"{stem}.png",
+        dpi=300,
+        bbox_inches="tight",
+        metadata={"Software": "mesa-cfdna"},
+    )
     plt.close(fig)
+    svg_path.write_text(
+        "\n".join(line.rstrip() for line in svg_path.read_text().splitlines()) + "\n"
+    )
 
 
 def main():
