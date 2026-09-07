@@ -2,6 +2,18 @@
 
 All notable changes to `mesa-cfdna` are documented here.
 
+## [0.7.4] - 2026-09-07
+
+### Changed
+
+- Prepared a new release after the prior v0.7.3 publish failure.
+- Kept the release workflow safeguard that installs `setuptools` before running `python setup.py --version` on Python 3.13.
+
+### Compatibility
+
+- No public API changes from `0.7.3`.
+- The distribution version is `0.7.4`; the previous release is `0.7.3`.
+
 ## [0.7.3] - 2026-09-07
 
 ### Added
@@ -23,4 +35,5 @@ All notable changes to `mesa-cfdna` are documented here.
 - NumPy inputs retain standard scikit-learn behavior for normalization and variance filtering.
 - The distribution version is `0.7.3`; the previous PyPI release was `0.7.2`.
 
+[0.7.4]: https://github.com/ChaorongC/mesa_cfdna/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/ChaorongC/mesa_cfdna/compare/v0.7.2...v0.7.3
