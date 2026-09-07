@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from mesa._selection import DataFrameNormalizer, DataFrameVarianceThreshold
 
@@ -24,6 +25,59 @@ def test_dataframe_normalizer_preserves_index_columns_and_values():
     expected = X.to_numpy(dtype=float)
     expected = expected / np.linalg.norm(expected, axis=1, keepdims=True)
     np.testing.assert_allclose(transformed.to_numpy(), expected)
+
+
+def test_dataframe_normalizer_aligns_to_training_columns_and_ignores_extras():
+    X_train = pd.DataFrame(
+        {
+            "a": [3.0, 0.0],
+            "b": [4.0, 5.0],
+        },
+        index=["train_1", "train_2"],
+    )
+    X_test = pd.DataFrame(
+        {
+            "extra": [100.0, 200.0],
+            "b": [8.0, 0.0],
+            "a": [6.0, 5.0],
+        },
+        index=["test_1", "test_2"],
+    )
+
+    normalizer = DataFrameNormalizer().fit(X_train)
+    transformed = normalizer.transform(X_test)
+
+    assert transformed.columns.tolist() == ["a", "b"]
+    assert transformed.index.equals(X_test.index)
+
+    expected = X_test[["a", "b"]].to_numpy(dtype=float)
+    expected = expected / np.linalg.norm(expected, axis=1, keepdims=True)
+    np.testing.assert_allclose(transformed.to_numpy(), expected)
+
+
+def test_dataframe_normalizer_rejects_missing_training_columns():
+    X = pd.DataFrame(
+        {
+            "a": [1.0, 2.0],
+            "b": [3.0, 4.0],
+        },
+        index=["s1", "s2"],
+    )
+
+    normalizer = DataFrameNormalizer().fit(X)
+
+    with pytest.raises(ValueError, match="columns used during fitting are missing"):
+        normalizer.transform(X[["a"]])
+
+
+def test_dataframe_normalizer_rejects_duplicate_feature_names():
+    X = pd.DataFrame(
+        [[1.0, 2.0], [2.0, 3.0]],
+        columns=["duplicate", "duplicate"],
+    )
+
+    with pytest.raises(ValueError, match="X columns must be unique"):
+        DataFrameNormalizer().fit(X)
 
 
 def test_dataframe_normalizer_retains_numpy_behavior():
