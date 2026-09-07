@@ -19,7 +19,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: "3.13"
 
       - name: Verify release tag matches package version
         shell: bash
@@ -31,9 +31,19 @@ jobs:
             exit 1
           fi
 
+      - name: Install package and release tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .
+          python -m pip install --upgrade build twine pytest
+
+      - name: Run test suite
+        run: |
+          pytest -q tests
+          python scripts/run_smoke_checks.py
+
       - name: Build and validate release distributions
         run: |
-          python -m pip install --upgrade build twine
           python -m build
           python -m twine check dist/*
 
