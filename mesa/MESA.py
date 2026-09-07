@@ -13,12 +13,13 @@ import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 from sklearn.base import clone
-from sklearn.feature_selection import GenericUnivariateSelect, VarianceThreshold, f_regression
+from sklearn.feature_selection import GenericUnivariateSelect, f_regression
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import Normalizer
 
 from ._selection import (
     BorutaSelector,
+    DataFrameVarianceThreshold,
     RedundancyPruner,
     get_support_indices,
     missing_value_processing,
@@ -73,7 +74,7 @@ class MESA_modality:
     top_n : int, default=100
         Number of Boruta-ranked features retained after fitting.
     variance_threshold : float, default=0
-        Threshold passed to ``VarianceThreshold`` after imputation.
+        Threshold passed to the variance filter after imputation.
     normalization : bool, default=False
         Whether to insert ``Normalizer()`` after missing-value handling.
     missing : float, default=0.1
@@ -173,7 +174,7 @@ class MESA_modality:
 
         pipeline_steps = [
             missing_value_processing(ratio=1 - self.missing),
-            VarianceThreshold(self.variance_threshold),
+            DataFrameVarianceThreshold(self.variance_threshold),
             clone(selector),
             RedundancyPruner(
                 mode=self.redundancy_pruning,
