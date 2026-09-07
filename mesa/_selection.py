@@ -7,6 +7,7 @@ from sklearn.feature_selection import VarianceThreshold, f_regression
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.model_selection import KFold, StratifiedKFold
+from sklearn.preprocessing import Normalizer
 
 from ._task_utils import (
     CLASSIFICATION,
@@ -112,6 +113,23 @@ class missing_value_processing:
     def get_support(self):
         """Return retained feature indices after missing-value filtering."""
         return self.indices
+
+
+class DataFrameNormalizer(Normalizer):
+    """Normalizer that preserves pandas sample and feature labels.
+
+    Numerical normalization is identical to scikit-learn ``Normalizer``.
+    When the input is a :class:`pandas.DataFrame`, ``transform`` wraps the
+    normalized array back into a DataFrame with the same row index and column
+    labels. NumPy inputs retain the standard scikit-learn behavior.
+    """
+
+    def transform(self, X, copy=None):
+        """Normalize rows while preserving DataFrame labels when present."""
+        Xt = super().transform(X, copy=copy)
+        if isinstance(X, pd.DataFrame):
+            return pd.DataFrame(Xt, index=X.index, columns=X.columns)
+        return Xt
 
 
 class DataFrameVarianceThreshold(VarianceThreshold):
