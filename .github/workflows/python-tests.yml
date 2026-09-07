@@ -1,0 +1,36 @@
+name: Python package checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install package and test tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .
+          python -m pip install --upgrade pytest build twine
+
+      - name: Run tests and smoke checks
+        run: |
+          pytest -q tests
+          python scripts/run_smoke_checks.py
+
+      - name: Validate distributions
+        run: |
+          python -m build
+          python -m twine check dist/*
