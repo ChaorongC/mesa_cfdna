@@ -15,10 +15,10 @@ from joblib import Parallel, delayed
 from sklearn.base import clone
 from sklearn.feature_selection import GenericUnivariateSelect, f_regression
 from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import Normalizer
 
 from ._selection import (
     BorutaSelector,
+    DataFrameNormalizer,
     DataFrameVarianceThreshold,
     RedundancyPruner,
     get_support_indices,
@@ -76,7 +76,7 @@ class MESA_modality:
     variance_threshold : float, default=0
         Threshold passed to the variance filter after imputation.
     normalization : bool, default=False
-        Whether to insert ``Normalizer()`` after missing-value handling.
+        Whether to insert row-wise ``Normalizer()`` after missing-value handling.
     missing : float, default=0.1
         Maximum allowed missing fraction per feature before the feature is
         removed. Internally converted to a valid-value ratio.
@@ -194,7 +194,7 @@ class MESA_modality:
             ),
         ]
         if self.normalization:
-            pipeline_steps.insert(1, Normalizer())
+            pipeline_steps.insert(1, DataFrameNormalizer())
 
         self.pipeline = make_pipeline(*pipeline_steps).fit(X, y)
         self.predictor_ = clone(predictor).fit(self.pipeline.transform(X), y)
@@ -317,16 +317,15 @@ class MESA:
     task : {"classification", "regression"}, default="classification"
         Shared learning task for all modalities and the meta-estimator.
     meta_estimator : sklearn-compatible estimator or None, default=None
-        Estimator fitted on modality-level outputs when
+        Estimator fitted on modality outputs when
         ``integration_method="stacking"``. If ``None``, a task-aware default is
         used.
     random_state : int, default=0
         Random seed used by the default CV splitter.
     cv : cross-validator or None, default=None
-        Splitter used to generate modality-level out-of-fold outputs for
-        stacking and control-anchored rank blending. It is ignored by direct
-        probability blending. If ``None``, a repeated task-aware splitter is
-        used.
+        Splitter used to generate out-of-fold modality predictions for stacking
+        and control-anchored rank blending. It is ignored by direct probability
+        blending. If ``None``, a repeated task-aware splitter is used.
     integration_method : {"stacking", "probability_blend", "control_anchor_rank_blend"}, default="stacking"
         Multimodal integration strategy. ``"stacking"`` preserves the original
         MESA behavior. ``"probability_blend"`` is a classification-only fixed
