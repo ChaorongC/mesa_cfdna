@@ -3,7 +3,7 @@ import pandas as pd
 from boruta import BorutaPy
 from scipy.stats import mannwhitneyu
 from sklearn.base import clone
-from sklearn.feature_selection import f_regression
+from sklearn.feature_selection import VarianceThreshold, f_regression
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.model_selection import KFold, StratifiedKFold
@@ -114,6 +114,61 @@ class missing_value_processing:
         return self.indices
 
 
+class DataFrameVarianceThreshold(VarianceThreshold):
+    """VarianceThreshold that preserves pandas sample and feature labels.
+
+    When fitted on a :class:`pandas.DataFrame`, this transformer records the
+    training feature order, preserves the row index and retained column names
+    during ``transform``, and aligns later DataFrame inputs to the training
+    column order before applying the fitted variance mask. NumPy inputs retain
+    the standard scikit-learn ``VarianceThreshold`` behavior.
+    """
+
+    def fit(self, X, y=None):
+        """Fit the variance filter and remember DataFrame column metadata."""
+        if isinstance(X, pd.DataFrame):
+            if not X.columns.is_unique:
+                raise ValueError("X columns must be unique.")
+            self._df_columns_in_ = X.columns.copy()
+
+        super().fit(X, y)
+
+        if isinstance(X, pd.DataFrame):
+            self._df_columns_out_ = self._df_columns_in_[self.get_support()]
+
+        return self
+
+    def transform(self, X):
+        """Apply the fitted variance mask while preserving DataFrame labels."""
+        if not isinstance(X, pd.DataFrame):
+            return super().transform(X)
+
+        if not hasattr(self, "_df_columns_in_"):
+            raise ValueError("Transformer was not fitted on a pandas DataFrame.")
+
+        missing = self._df_columns_in_.difference(X.columns)
+        if len(missing):
+            raise ValueError(
+                f"{len(missing)} columns used during fitting are missing from X."
+            )
+
+        # Restore the exact training feature order before applying the learned mask.
+        X_aligned = X.loc[:, self._df_columns_in_]
+        Xt = super().transform(X_aligned)
+
+        return pd.DataFrame(
+            Xt,
+            index=X.index,
+            columns=self._df_columns_out_,
+        )
+
+    def get_feature_names_out(self, input_features=None):
+        """Return retained DataFrame feature names when available."""
+        if hasattr(self, "_df_columns_out_"):
+            return np.asarray(self._df_columns_out_, dtype=object)
+        return super().get_feature_names_out(input_features)
+
+
 class RedundancyPruner:
     """Remove highly correlated features by keeping one representative per block.
 
@@ -131,9 +186,9 @@ class RedundancyPruner:
         Estimator used in ``mode="model"`` to rank features within correlated
         blocks.
     cv : int or cross-validator, default=3
-        Cross-validation strategy used in ``mode="model"``.
+        Cross-validation strategy used by model-based redundancy pruning.
     metric : str or None, default=None
-        Optional task-aware metric used in ``mode="model"``.
+        Optional task-aware metric used by model-based redundancy pruning.
     """
 
     def __init__(
