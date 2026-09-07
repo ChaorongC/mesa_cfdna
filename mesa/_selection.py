@@ -119,17 +119,41 @@ class DataFrameNormalizer(Normalizer):
     """Normalizer that preserves pandas sample and feature labels.
 
     Numerical normalization is identical to scikit-learn ``Normalizer``.
-    When the input is a :class:`pandas.DataFrame`, ``transform`` wraps the
-    normalized array back into a DataFrame with the same row index and column
-    labels. NumPy inputs retain the standard scikit-learn behavior.
+    When fitted on a :class:`pandas.DataFrame`, the transformer records the
+    training feature order, aligns later DataFrame inputs to that order, and
+    returns normalized values with the original sample index. NumPy inputs
+    retain the standard scikit-learn behavior.
     """
+
+    def fit(self, X, y=None):
+        """Fit the normalizer and remember DataFrame column metadata."""
+        if isinstance(X, pd.DataFrame):
+            if not X.columns.is_unique:
+                raise ValueError("X columns must be unique.")
+            self._df_columns_in_ = X.columns.copy()
+        return super().fit(X, y)
 
     def transform(self, X, copy=None):
         """Normalize rows while preserving DataFrame labels when present."""
-        Xt = super().transform(X, copy=copy)
-        if isinstance(X, pd.DataFrame):
-            return pd.DataFrame(Xt, index=X.index, columns=X.columns)
-        return Xt
+        if not isinstance(X, pd.DataFrame):
+            return super().transform(X, copy=copy)
+
+        if hasattr(self, "_df_columns_in_"):
+            missing = self._df_columns_in_.difference(X.columns)
+            if len(missing):
+                raise ValueError(
+                    f"{len(missing)} columns used during fitting are missing from X."
+                )
+            X_aligned = X.loc[:, self._df_columns_in_]
+        else:
+            X_aligned = X
+
+        Xt = super().transform(X_aligned, copy=copy)
+        return pd.DataFrame(
+            Xt,
+            index=X.index,
+            columns=X_aligned.columns,
+        )
 
 
 class DataFrameVarianceThreshold(VarianceThreshold):
